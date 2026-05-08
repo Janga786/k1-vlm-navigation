@@ -1,0 +1,16 @@
+# run output dirs (videos, state logs)
+out/
+out_*/
+*.mp4
+!docs/*.mp4
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
