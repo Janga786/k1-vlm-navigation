@@ -104,7 +104,8 @@ DEFAULT_CKPT = (_NAVILA_REPO / "checkpoints" / "navila-llama3-8b-8f")
 
 def build_scene_xml(robot_xml_path: Path,
                     target_pos: tuple[float, float, float],
-                    distractors: list[tuple[str, tuple[float, float, float], str, str]]
+                    distractors: list[tuple[str, tuple[float, float, float], str, str]],
+                    solid_targets: bool = True,
                     ) -> str:
     """Augment K1_22dof.xml with cameras, target, and distractors.
 
@@ -191,6 +192,10 @@ def build_scene_xml(robot_xml_path: Path,
         floor.set("condim", "3")
 
     # --- target (red box) ---------------------------------------------------
+    # Bodies have no joint → static (pinned to world). With default
+    # contype/conaffinity = 1 this acts as an immovable obstacle the K1
+    # cannot walk through. Pass `solid_targets=False` to revert to the
+    # visual-only ghost behavior used in early demos.
     target = ET.SubElement(worldbody, "body")
     target.set("name", "navigation_target")
     target.set("pos", f"{target_pos[0]} {target_pos[1]} {target_pos[2]}")
@@ -198,8 +203,9 @@ def build_scene_xml(robot_xml_path: Path,
     g.set("type", "box")
     g.set("size", "0.20 0.20 0.30")
     g.set("rgba", "0.92 0.10 0.10 1")
-    g.set("contype", "0")          # no collisions with the K1
-    g.set("conaffinity", "0")
+    if not solid_targets:
+        g.set("contype", "0")
+        g.set("conaffinity", "0")
 
     # --- distractors --------------------------------------------------------
     for name, pos, rgba, sz in distractors:
@@ -210,8 +216,9 @@ def build_scene_xml(robot_xml_path: Path,
         gg.set("type", "box")
         gg.set("size", sz)
         gg.set("rgba", rgba)
-        gg.set("contype", "0")
-        gg.set("conaffinity", "0")
+        if not solid_targets:
+            gg.set("contype", "0")
+            gg.set("conaffinity", "0")
 
     return ET.tostring(root, encoding="unicode")
 
@@ -645,6 +652,9 @@ def main() -> None:
     ap.add_argument("--vyaw-max", type=float, default=0.6)
     ap.add_argument("--save-video", type=Path, default=None,
                      help="Write scene_view.mp4 + head_view.mp4 to this dir.")
+    ap.add_argument("--ghost-targets", action="store_true", default=False,
+                     help="Make the target boxes visual-only (no collisions). "
+                          "Default: solid obstacles the K1 cannot walk through.")
     ap.add_argument("--no-vlm", action="store_true",
                      help="Skip NaVILA; drive with constant vx instead "
                           "(useful to test the walking pipeline).")
@@ -660,7 +670,9 @@ def main() -> None:
         ("distractor_blue",  blue_pos,  "0.10 0.30 0.85 1", "0.18 0.18 0.25"),
         ("distractor_green", green_pos, "0.10 0.70 0.20 1", "0.18 0.18 0.25"),
     ]
-    scene_xml = build_scene_xml(K1_XML, tuple(args.target), distractors)
+    scene_xml = build_scene_xml(K1_XML, tuple(args.target), distractors,
+                                  solid_targets=not args.ghost_targets)
+    print(f"[scene] targets are {'GHOST (no collisions)' if args.ghost_targets else 'SOLID (collidable)'}")
 
     # Map every name a user might say to the world-pos it should aim for.
     scene_targets: dict[str, tuple[float, float, float]] = {
