@@ -28,17 +28,10 @@ import time
 from collections import deque
 from pathlib import Path
 
-import torch
+# torch + llava are lazy-imported inside load_navila() / run_inference() so
+# the cheap helpers in this module (parse_action, build_prompt) stay usable
+# from environments that don't have llava installed (e.g. unit tests).
 from PIL import Image
-
-from llava.constants import IMAGE_TOKEN_INDEX
-from llava.conversation import SeparatorStyle, conv_templates
-from llava.mm_utils import (
-    KeywordsStoppingCriteria, get_model_name_from_path,
-    process_images, tokenizer_image_token,
-)
-from llava.model.builder import load_pretrained_model
-from llava.utils import disable_torch_init
 
 DEFAULT_CKPT = Path.home() / "Projects/booster/NaVILA/checkpoints/navila-llama3-8b-8f"
 NUM_FRAMES = 8
@@ -116,6 +109,9 @@ def build_prompt(instruction: str, num_frames: int = NUM_FRAMES) -> str:
 
 
 def load_navila(model_path: Path):
+    from llava.mm_utils import get_model_name_from_path
+    from llava.model.builder import load_pretrained_model
+    from llava.utils import disable_torch_init
     disable_torch_init()
     print(f"Loading NaVILA from {model_path} ...")
     model_name = get_model_name_from_path(str(model_path))
@@ -129,6 +125,12 @@ def load_navila(model_path: Path):
 
 def run_inference(tokenizer, model, image_processor, frames: list[Image.Image],
                   instruction: str, max_new_tokens: int = 128) -> str:
+    import torch
+    from llava.constants import IMAGE_TOKEN_INDEX
+    from llava.conversation import SeparatorStyle, conv_templates
+    from llava.mm_utils import (
+        KeywordsStoppingCriteria, process_images, tokenizer_image_token,
+    )
     images_tensor = process_images(frames, image_processor, model.config).to(
         model.device, dtype=torch.float16)
     qs = build_prompt(instruction, len(frames))

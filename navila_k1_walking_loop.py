@@ -41,16 +41,10 @@ os.environ.setdefault("MUJOCO_GL", "egl")  # before mujoco imports
 
 import argparse
 import math
-import re
 import sys
-import tempfile
-import threading
 import time
 import xml.etree.ElementTree as ET
-from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # --- path injection so we can import everything from one process -----------
 _K1RES = Path.home() / "Projects" / "k1_research"
@@ -66,23 +60,18 @@ for p in (_NAVILA_REPO, _BOOSTER_ASSETS_SRC, _BOOSTER_DEPLOY):
 import cv2
 import mujoco
 import numpy as np
-import torch
 from PIL import Image
-
-# --- VLM imports ------------------------------------------------------------
-from llava.constants import IMAGE_TOKEN_INDEX
-from llava.conversation import SeparatorStyle, conv_templates
-from llava.mm_utils import (
-    KeywordsStoppingCriteria, get_model_name_from_path,
-    process_images, tokenizer_image_token,
-)
-from llava.model.builder import load_pretrained_model
-from llava.utils import disable_torch_init
 
 # --- bridge (action parser, prompt builder) ---------------------------------
 sys.path.insert(0, str(Path(__file__).parent))
 from navila_k1_bridge import (  # type: ignore  # noqa: E402
-    NUM_FRAMES, build_prompt, parse_action, ACTION_DURATION,
+    NUM_FRAMES, ACTION_DURATION,
+)
+# --- core (planner, controllers, VLMRunner) ---------------------------------
+from navila_k1_core import (  # noqa: E402
+    SubStep, TerminationState, VLMRunner,
+    apply_controllers, check_termination, describe_substep,
+    parse_substeps, update_yaw_unwrap, wrap_pi, yaw_from_quat,
 )
 
 # --- booster_deploy walking policy ------------------------------------------
@@ -224,102 +213,6 @@ def build_scene_xml(robot_xml_path: Path,
 
 
 # ============================================================================
-# Multi-step instruction planner
-# ============================================================================
-
-
-@dataclass
-class SubStep:
-    """One atomic instruction handed to NaVILA, plus how we know it is done.
-
-    Termination priority (first match wins):
-      1. ``proximity_target`` reached within ``proximity_threshold`` (m, xy).
-      2. ``yaw_delta_target`` reached (signed radians, accumulated since the
-         start of this sub-step).
-      3. NaVILA emits "stop".
-      4. ``time_limit`` seconds elapsed.
-    """
-    instruction: str
-    time_limit: float = 30.0
-    proximity_target: Optional[tuple[float, float, float]] = None
-    proximity_threshold: float = 0.6
-    yaw_delta_target: Optional[float] = None  # signed radians (left=+)
-
-
-# Sub-step splitter: pipe, semicolon, or "then" (with optional comma).
-_SPLIT = re.compile(r"\s*\|\s*|\s*;\s*|,?\s+then\s+", re.I)
-# Turn parser: matches the same phrases NaVILA emits + plain user input.
-_TURN_PAT = re.compile(
-    r"\bturn\s+(?P<dir>left|right)\s+(?P<n>\d+(?:\.\d+)?)"
-    r"\s*(?P<u>deg|degree|degrees|rad|radian|radians)\b",
-    re.I,
-)
-
-
-def parse_substeps(text: str,
-                   scene_targets: dict[str, tuple[float, float, float]],
-                   default_time: float,
-                   proximity_threshold: float,
-                   ) -> list[SubStep]:
-    """Decompose a multi-step instruction into ``SubStep``s.
-
-    Each chunk is the instruction we feed NaVILA verbatim. We additionally
-    inspect the text for cues that let us terminate the sub-step from the
-    outside, which is more reliable than waiting for NaVILA's "stop":
-
-    - ``"turn (left|right) N deg"``  → yaw-delta termination
-    - mentions of a known scene target (e.g. "red box") → proximity termination
-    """
-    chunks = [c.strip() for c in _SPLIT.split(text) if c.strip()]
-    if not chunks:
-        chunks = [text.strip()]
-
-    steps: list[SubStep] = []
-    for c in chunks:
-        ss = SubStep(instruction=c, time_limit=default_time,
-                     proximity_threshold=proximity_threshold)
-
-        m = _TURN_PAT.search(c)
-        if m:
-            sign = 1.0 if m.group("dir").lower() == "left" else -1.0
-            n = float(m.group("n"))
-            unit = m.group("u").lower()
-            angle = math.radians(n) if unit.startswith("deg") else n
-            ss.yaw_delta_target = sign * angle
-
-        # Match the LAST scene target named in the instruction so a phrase
-        # like "walk past the blue box to the red box" picks "red box".
-        last_match_at = -1
-        for name, pos in scene_targets.items():
-            m2 = list(re.finditer(rf"\b{re.escape(name)}\b", c, re.I))
-            if m2 and m2[-1].start() > last_match_at:
-                last_match_at = m2[-1].start()
-                ss.proximity_target = pos
-
-        # If both yaw and proximity were detected (e.g. "turn right 90 deg
-        # toward the red box"), prefer yaw — it's the explicit primitive.
-        if ss.yaw_delta_target is not None and ss.proximity_target is not None:
-            ss.proximity_target = None
-
-        steps.append(ss)
-    return steps
-
-
-def describe_substep(i: int, n: int, ss: SubStep) -> str:
-    bits = [f"step {i + 1}/{n}: {ss.instruction!r}"]
-    if ss.yaw_delta_target is not None:
-        bits.append(f"yaw_target={math.degrees(ss.yaw_delta_target):+.0f}°")
-    if ss.proximity_target is not None:
-        bits.append(f"proximity={ss.proximity_target[:2]} (<{ss.proximity_threshold}m)")
-    bits.append(f"time_limit={ss.time_limit:.0f}s")
-    return "  ".join(bits)
-
-
-def wrap_pi(a: float) -> float:
-    return float(((a + math.pi) % (2.0 * math.pi)) - math.pi)
-
-
-# ============================================================================
 # Walking + camera controller
 # ============================================================================
 
@@ -362,217 +255,6 @@ class WalkingSceneController(MujocoController):
     # VLM thread.
     def update_vel_command(self) -> None:  # type: ignore[override]
         return None
-
-
-# ============================================================================
-# NaVILA loader and inference helpers
-# ============================================================================
-
-def load_navila(model_path: Path):
-    disable_torch_init()
-    print(f"[VLM] Loading NaVILA from {model_path} ...", flush=True)
-    model_name = get_model_name_from_path(str(model_path))
-    tokenizer, model, image_processor, _ = load_pretrained_model(
-        str(model_path), model_name, model_base=None,
-        attn_implementation="sdpa",
-    )
-    print("[VLM] NaVILA ready.", flush=True)
-    return tokenizer, model, image_processor
-
-
-@torch.inference_mode()
-def run_inference(tokenizer, model, image_processor,
-                  frames: list[Image.Image], instruction: str,
-                  max_new_tokens: int = 64) -> str:
-    images_tensor = process_images(
-        frames, image_processor, model.config
-    ).to(model.device, dtype=torch.float16)
-    qs = build_prompt(instruction, len(frames))
-    conv = conv_templates["llama_3"].copy()
-    conv.append_message(conv.roles[0], qs)
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-    input_ids = tokenizer_image_token(
-        prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
-    ).unsqueeze(0).cuda()
-    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    stopping = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids)
-    out_ids = model.generate(
-        input_ids,
-        images=images_tensor.half().cuda(),
-        do_sample=False,
-        temperature=0.0,
-        max_new_tokens=max_new_tokens,
-        use_cache=True,
-        stopping_criteria=[stopping],
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    out = tokenizer.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
-    if out.endswith(stop_str):
-        out = out[: -len(stop_str)].strip()
-    return out
-
-
-# ============================================================================
-# VLM background thread
-# ============================================================================
-
-class VLMRunner:
-    """Continuous NaVILA inference on the latest head_cam buffer.
-
-    The main thread pushes head frames; this thread keeps running NaVILA on
-    the latest snapshot and publishes the parsed velocity command. When NaVILA
-    emits "stop", `stop_event` is set so the main loop wraps up.
-    """
-
-    def __init__(
-        self,
-        model_path: Path,
-        action_duration: float,
-        vx_max: float,
-        vy_max: float,
-        vyaw_max: float,
-    ):
-        self.action_duration = action_duration
-        self.vx_max, self.vy_max, self.vyaw_max = vx_max, vy_max, vyaw_max
-
-        self.tokenizer, self.model, self.image_processor = load_navila(model_path)
-
-        self._lock = threading.Lock()
-        self._cmd = (0.0, 0.0, 0.0)
-        self._label = "(waiting on first vlm result)"
-        self._raw_text = ""
-        self._inf_count = 0
-        self._inf_ms = 0.0
-
-        self._instruction_lock = threading.Lock()
-        self._instruction = "(none)"
-
-        self._frame_lock = threading.Lock()
-        self._frame_buffer: deque[Image.Image] = deque(maxlen=NUM_FRAMES)
-
-        self.stop_event = threading.Event()      # set when "stop" parsed
-        self._abort = threading.Event()          # set by main to quit
-        self._thread: threading.Thread | None = None
-
-    # ------------------------------------------------------------------ API
-    def push_frame(self, rgb: np.ndarray) -> None:
-        img = Image.fromarray(rgb)
-        with self._frame_lock:
-            self._frame_buffer.append(img)
-
-    def bootstrap_buffer(self, rgb: np.ndarray) -> None:
-        """Fill the buffer with copies of `rgb` (used at startup so NaVILA
-        always has 8 frames to look at)."""
-        img = Image.fromarray(rgb)
-        with self._frame_lock:
-            for _ in range(NUM_FRAMES):
-                self._frame_buffer.append(img)
-
-    def get_command(self) -> tuple[float, float, float]:
-        with self._lock:
-            return self._cmd
-
-    def set_instruction(self, text: str) -> None:
-        """Switch the active instruction (called by main on sub-step advance)."""
-        with self._instruction_lock:
-            self._instruction = text
-        # Force the published command back to zero so the policy doesn't
-        # carry the previous sub-step's cmd into this one until the first
-        # NaVILA result for the new instruction lands.
-        with self._lock:
-            self._cmd = (0.0, 0.0, 0.0)
-            self._label = f"(switching to: {text})"
-
-    def get_instruction(self) -> str:
-        with self._instruction_lock:
-            return self._instruction
-
-    def clear_stop(self) -> None:
-        """Reset the stop signal so the next sub-step starts fresh."""
-        self.stop_event.clear()
-
-    def status(self) -> dict:
-        with self._lock:
-            return {
-                "label": self._label,
-                "raw": self._raw_text,
-                "vx": self._cmd[0],
-                "vy": self._cmd[1],
-                "vyaw": self._cmd[2],
-                "inf_count": self._inf_count,
-                "inf_ms": self._inf_ms,
-            }
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="vlm",
-                                         daemon=True)
-        self._thread.start()
-
-    def shutdown(self, timeout: float = 5.0) -> None:
-        self._abort.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-
-    # ------------------------------------------------------------------ loop
-    def _snapshot(self) -> list[Image.Image]:
-        with self._frame_lock:
-            return list(self._frame_buffer)
-
-    def _publish(self, vx: float, vy: float, vyaw: float, label: str,
-                 raw: str, inf_ms: float) -> None:
-        with self._lock:
-            self._cmd = (vx, vy, vyaw)
-            self._label = label
-            self._raw_text = raw
-            self._inf_count += 1
-            self._inf_ms = inf_ms
-
-    def _loop(self) -> None:
-        # Wait until the main thread bootstraps the buffer AND sets the first
-        # instruction. We don't want NaVILA running with "(none)".
-        while not self._abort.is_set() and (
-            len(self._snapshot()) == 0
-            or self.get_instruction() == "(none)"
-        ):
-            time.sleep(0.05)
-
-        while not self._abort.is_set():
-            frames = self._snapshot()
-            if len(frames) < NUM_FRAMES:
-                # pad: repeat oldest frame to reach NUM_FRAMES
-                frames = [frames[0]] * (NUM_FRAMES - len(frames)) + frames
-            instruction = self.get_instruction()
-            t0 = time.perf_counter()
-            try:
-                raw = run_inference(self.tokenizer, self.model,
-                                    self.image_processor, frames,
-                                    instruction)
-            except Exception as e:
-                print(f"[VLM] inference failed: {e!r}", flush=True)
-                time.sleep(0.5)
-                continue
-            inf_ms = (time.perf_counter() - t0) * 1000.0
-
-            vx, vy, vyaw, label = parse_action(raw, self.action_duration)
-            # Re-clip to our (possibly higher) caps; navila_k1_bridge clips to
-            # its conservative VX_MAX/VY_MAX/VYAW_MAX which we may want to
-            # raise.
-            vx = max(-self.vx_max, min(self.vx_max, vx))
-            vy = max(-self.vy_max, min(self.vy_max, vy))
-            vyaw = max(-self.vyaw_max, min(self.vyaw_max, vyaw))
-
-            self._publish(vx, vy, vyaw, label, raw, inf_ms)
-            print(f"[VLM #{self._inf_count:03d} {inf_ms:5.0f}ms] "
-                  f"task={instruction!r}\n"
-                  f"            raw={raw!r}\n"
-                  f"            -> {label}  "
-                  f"vx={vx:+.2f} vy={vy:+.2f} vyaw={vyaw:+.2f}", flush=True)
-
-            # Set the stop event but DO NOT terminate the thread — the main
-            # loop may advance us to the next sub-step.
-            if label == "stop":
-                self.stop_event.set()
 
 
 # ============================================================================
@@ -1069,12 +751,6 @@ def draw_hud(bgr: np.ndarray, lines: list[str]) -> np.ndarray:
                     (255, 255, 255), 1, cv2.LINE_AA)
         y += 22
     return bgr
-
-
-def yaw_from_quat(q: np.ndarray) -> float:
-    w, x, y, z = q
-    return float(np.arctan2(2.0 * (w * z + x * y),
-                              1.0 - 2.0 * (y * y + z * z)))
 
 
 if __name__ == "__main__":
