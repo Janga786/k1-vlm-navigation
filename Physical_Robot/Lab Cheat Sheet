@@ -1,0 +1,123 @@
+YOUR LAB CHEAT SHEET
+  
+  A. Start the server (over SSH from the laptop, or in person)
+
+  ssh janga@<DESKTOP_TAILSCALE_IP>      # or:  ssh janga@<DESKTOP_TAILNET_HOSTNAME>
+  ~/start_navila_server.sh
+
+  Wait for [server] listening on 0.0.0.0:5555 — Ctrl-C to exit. (~5 s).
+  Leave the SSH session open or run via tmux/screen/nohup.
+
+  B. First robot contact — climb the ladder
+
+  1. Joystick first (10 minutes).  Power on the K1, pair the joystick,
+  walk it around manually. Confirm:
+  - emergency stop on the joystick works
+  - robot enters/exits walking mode cleanly
+  - battery is healthy
+  
+  2. SDK sanity (5 minutes).  Cable in the laptop, then on the laptop:
+  conda activate navila        # or activate whatever env has the SDK
+  python ~/Projects/k1_research/booster/booster_robotics_sdk/example/high_
+  level/b1_loco_example_client.py 192.168.10.102
+  # type 'gm' (get mode), 'mp' (kPrepare), 'mw' (kWalking), small 'w'/'s' 
+  commands, then 'md' (kDamping)
+  This confirms the Ethernet + SDK link is healthy without NaVILA in the
+  loop.
+  
+  3. Print mode (no robot motion at all).  End-to-end NaVILA pipeline
+  smoke test using a static image:
+  python ~/Projects/k1_research/experiments/navila/navila_laptop_relay.py
+  \
+      --mode print \
+      --image-source static \
+      --image-path ~/Projects/k1_research/experiments/vla/test_image.jpg \
+      --server <DESKTOP_TAILSCALE_IP> \
+      --instruction "walk forward 1 meter"
+  You should see HUD + would send Move(...) lines and a clean exit.
+
+  4. Dry mode on the powered K1 (no motion, but full SDK).
+  python ~/Projects/k1_research/experiments/navila/navila_laptop_relay.py
+  \
+      --mode dry \
+      --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
+      --server <DESKTOP_TAILSCALE_IP> \
+      --net 192.168.10.102 \ 
+      --instruction "walk forward 1 meter"
+  (Use --image-source dir --image-dir <recorded> if the K1 doesn't have an
+   MJPEG stream up.) [actuator/dry] would send Move(...) lines should
+  appear; the K1 will NOT move.
+  
+  5. Live, floor cleared, kill switch in hand.
+  python ~/Projects/k1_research/experiments/navila/navila_laptop_relay.py
+  \
+      --mode live \
+      --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
+      --server <DESKTOP_TAILSCALE_IP> \
+      --net 192.168.10.102 \ 
+      --instruction "walk forward 1 meter"
+  Test the kill path first: start it, then immediately press q in the HUD
+  window. Confirm the robot stops within ~1.5 s. Only after that, run an
+  actual instruction.
+
+  C. Emergency-stop options (in order of preference)
+
+  1. Joystick e-stop — physical, always works
+  2. q in the HUD window — zeros Move, switches K1 to kDamping, exits
+  cleanly
+  3. Ctrl-C in the relay terminal — same SIGINT handler
+  4. Pull the Ethernet cable — laptop's 1.5 s watchdog zeroes Move, then
+  the K1's own loss-of-link logic kicks in
+  5. Kill the relay process — same as 4
+  6. Power switch — last resort
+
+  D. If something goes wrong
+
+  symptom: [remote] connecting to <DESKTOP_TAILSCALE_IP>:5555 ... hangs
+  most likely cause: server not running, or ufw blocks Tailscale
+  fix: on desktop: check ~/start_navila_server.sh shell. If needed: sudo 
+    ufw allow in on tailscale0 to any port 5555
+  ────────────────────────────────────────
+  symptom: connection refused
+  most likely cause: server crashed / not started
+  fix: re-run ~/start_navila_server.sh
+  ────────────────────────────────────────
+  symptom: [remote] network error: timed out
+  most likely cause: NaVILA wedged or Tailscale slow
+  fix: restart server, check tailscale status
+  ────────────────────────────────────────
+  symptom: import booster_robotics_sdk_python fails on laptop
+  most likely cause: SDK wheel not installed
+  fix: ./setup_laptop.sh re-run, or build from source per REMOTE_README.md
+  ────────────────────────────────────────
+  symptom: HUD buf=0 forever
+  most likely cause: server isn't decoding frames
+  fix: check --jpeg-quality; default 80 is fine
+  ────────────────────────────────────────
+  symptom: robot drifts on "walk forward"
+  most likely cause: known NaVILA bias, no heading-assist without pose
+  fix: acceptable for short distances; live with it for v1
+  ────────────────────────────────────────
+  symptom: robot spins forever on "turn N deg"
+  most likely cause: --turn-controller on without pose
+  fix: use --no-turn-controller (already the laptop default — only happens
+
+    if you flipped it)
+  ────────────────────────────────────────
+  symptom: Move() calls don't seem to move the robot
+  most likely cause: wrong --net, robot not in kWalking
+  fix: double-check --net 192.168.10.102; verify with
+    b1_loco_example_client.py first
+
+  E. Quick reference
+
+  - Desktop Tailscale IP: <DESKTOP_TAILSCALE_IP>  (also: <DESKTOP_TAILNET_HOSTNAME>)
+  - K1 IP: 192.168.10.102 (per your earlier spec)
+  - Server port: 5555
+  - Conda env (both desktop server + laptop SDK): navila
+  - Startup script (desktop): ~/start_navila_server.sh
+  - Relay script (laptop):
+  ~/Projects/k1_research/experiments/navila/navila_laptop_relay.py
+  - Full docs: ~/Projects/k1_research/experiments/navila/REMOTE_README.md
+
+
