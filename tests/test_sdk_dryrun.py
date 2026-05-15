@@ -103,7 +103,8 @@ class DryRunActuatorTests(unittest.TestCase):
     def setUp(self):
         self.fake_sdk = _install_fake_sdk()
         from navila_k1_realrobot import DryRunActuator
-        self.act = DryRunActuator(net="127.0.0.1")
+        self.act = DryRunActuator(net="192.168.10.102",
+                                   local_ip="127.0.0.1")
 
     def tearDown(self):
         _uninstall_fake_sdk()
@@ -123,7 +124,7 @@ class DryRunActuatorTests(unittest.TestCase):
         self.assertEqual(client.move_calls, [],
                           "DryRunActuator must NEVER call Move()")
 
-    def test_channel_factory_initialised_with_net(self):
+    def test_channel_factory_initialised_with_local_ip(self):
         self.act.init()
         cf = _FakeChannelFactory.Instance()
         self.assertEqual(cf.init_calls, [(0, "127.0.0.1")])
@@ -135,8 +136,8 @@ class LiveActuatorTests(unittest.TestCase):
         self.fake_sdk = _install_fake_sdk()
         from navila_k1_realrobot import LiveActuator
         # Use a fast send_hz so the test doesn't take long.
-        self.act = LiveActuator(net="127.0.0.1", send_hz=100.0,
-                                 watchdog_seconds=0.2)
+        self.act = LiveActuator(net="192.168.10.102", local_ip="127.0.0.1",
+                                 send_hz=100.0, watchdog_seconds=0.2)
 
     def tearDown(self):
         try:

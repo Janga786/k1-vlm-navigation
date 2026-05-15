@@ -18,7 +18,8 @@ Three operating modes
                     sent. Use this on the real robot before live to
                     validate NaVILA's outputs against the ZED's view.
 - ``--mode live``   Send Move() at SEND_HZ. Switches to kWalking on
-                    start, kDamping on exit. KILL the process to stop.
+                    start, kPrepare on exit (so the robot stays standing).
+                    KILL the process to stop.
 
 Image source (``--image-source``)
 ==================================
@@ -285,8 +286,8 @@ class DryRunActuator(Actuator):
 
 
 class LiveActuator(Actuator):
-    """Real robot. Switches to kWalking on init, kDamping on exit, sends
-    Move() at the requested rate."""
+    """Real robot. Switches to kWalking on init, kPrepare on exit (robot
+    stays standing), sends Move() at the requested rate."""
     name = "live"
 
     def __init__(self, net: str, send_hz: float = 20.0,
@@ -334,12 +335,14 @@ class LiveActuator(Actuator):
             self._cmd_set_at = time.perf_counter()
 
     def shutdown(self) -> None:
-        print("[actuator/live] shutdown: zero cmd, then kDamping ...")
+        print("[actuator/live] shutdown: zero cmd, then kPrepare ...")
         self._abort.set()
         if self._sender_thread is not None:
             self._sender_thread.join(timeout=2.0)
-        # Try to zero the cmd, but ALWAYS attempt to dampen — leaving the
-        # robot in kWalking on a crashed shutdown is the worst-case outcome.
+        # Zero the cmd, then return to kPrepare so the robot stays standing
+        # at the end of the run (operator preference — kDamping makes it
+        # collapse). Leaving the robot in kWalking on a crashed shutdown
+        # is the worst-case outcome, so we always try the ChangeMode.
         try:
             self._client.Move(0.0, 0.0, 0.0)
             time.sleep(0.2)
@@ -347,10 +350,10 @@ class LiveActuator(Actuator):
             print(f"[actuator/live] zero Move() failed: {e!r}",
                   file=sys.stderr)
         try:
-            self._client.ChangeMode(self._RobotMode.kDamping)
-            print("[actuator/live] kDamping.")
+            self._client.ChangeMode(self._RobotMode.kPrepare)
+            print("[actuator/live] kPrepare.")
         except Exception as e:
-            print(f"[actuator/live] kDamping ChangeMode failed: {e!r}",
+            print(f"[actuator/live] kPrepare ChangeMode failed: {e!r}",
                   file=sys.stderr)
 
     def _sender_loop(self):
