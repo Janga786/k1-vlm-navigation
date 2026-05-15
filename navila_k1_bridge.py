@@ -36,11 +36,16 @@ from PIL import Image
 DEFAULT_CKPT = Path.home() / "Projects/booster/NaVILA/checkpoints/navila-llama3-8b-8f"
 NUM_FRAMES = 8
 
-# Safety caps per the SDK example envelope.
-VX_MAX = 0.4
-VY_MAX = 0.15
-VYAW_MAX = 0.2
-ACTION_DURATION = 1.5  # seconds to hold each VLM action before re-asking
+# Paper-spec command velocities (NaVILA, RSS 2025, Section II-B):
+# VLM outputs cast to fixed speeds; per-action duration is what varies.
+# 0.5 m/s for forward/backward, π/6 rad/s for turns.
+import math as _math
+FORWARD_SPEED = 0.5             # m/s
+TURN_SPEED = _math.pi / 6.0     # rad/s
+
+# Fallback duration when an action can't be parsed or carries no distance —
+# kept for backwards compat with callers that still pass this through.
+ACTION_DURATION = 1.5
 SEND_HZ = 20.0
 
 
@@ -73,25 +78,34 @@ def _angle_to_rad(n: float, unit: str) -> float:
     return math.radians(n) if u.startswith("deg") else n
 
 
-def parse_action(text: str, duration: float = ACTION_DURATION) -> tuple[float, float, float, str]:
-    """Return (vx, vy, vyaw, label). Unrecognized -> stop."""
+def parse_action(text: str, duration: float = ACTION_DURATION
+                 ) -> tuple[float, float, float, float, str]:
+    """Map a NaVILA text action → fixed-speed command + duration.
+
+    Per NaVILA paper §II-B, the VLM's discrete output {forward, turn left,
+    turn right, stop} is cast to **fixed command velocities** (0.5 m/s,
+    ±π/6 rad/s, 0) and held for the time that matches the requested
+    distance / angle. Speed is constant; duration varies.
+
+    Returns ``(vx, vy, vyaw, duration_s, label)``. The ``duration`` arg is
+    retained as a fallback for unparsed actions and is otherwise ignored.
+    """
     if _STOP.search(text):
-        return 0.0, 0.0, 0.0, "stop"
+        return 0.0, 0.0, 0.0, 0.0, "stop"
     if (m := _FORWARD.search(text)):
         d = _len_to_meters(float(m["n"]), m["u"])
-        return _clip(d / duration, VX_MAX), 0.0, 0.0, f"forward {d:.2f}m"
+        dur = abs(d) / FORWARD_SPEED if FORWARD_SPEED > 0 else duration
+        return FORWARD_SPEED, 0.0, 0.0, dur, f"forward {d:.2f}m"
     if (m := _BACKWARD.search(text)):
         d = _len_to_meters(float(m["n"]), m["u"])
-        return -_clip(d / duration, VX_MAX), 0.0, 0.0, f"backward {d:.2f}m"
+        dur = abs(d) / FORWARD_SPEED if FORWARD_SPEED > 0 else duration
+        return -FORWARD_SPEED, 0.0, 0.0, dur, f"backward {d:.2f}m"
     if (m := _TURN.search(text)):
         a = _angle_to_rad(float(m["n"]), m["u"])
         sign = 1.0 if m["dir"].lower() == "left" else -1.0
-        return 0.0, 0.0, sign * _clip(a / duration, VYAW_MAX), f"turn {m['dir']} {a:.2f}rad"
-    return 0.0, 0.0, 0.0, "unparsed -> stop"
-
-
-def _clip(v: float, cap: float) -> float:
-    return max(-cap, min(cap, v))
+        dur = abs(a) / TURN_SPEED if TURN_SPEED > 0 else duration
+        return 0.0, 0.0, sign * TURN_SPEED, dur, f"turn {m['dir']} {a:.2f}rad"
+    return 0.0, 0.0, 0.0, 0.0, "unparsed -> stop"
 
 
 # ---- VLM -------------------------------------------------------------------
@@ -124,7 +138,7 @@ def load_navila(model_path: Path):
 
 
 def run_inference(tokenizer, model, image_processor, frames: list[Image.Image],
-                  instruction: str, max_new_tokens: int = 128) -> str:
+                  instruction: str, max_new_tokens: int = 256) -> str:
     import torch
     from llava.constants import IMAGE_TOKEN_INDEX
     from llava.conversation import SeparatorStyle, conv_templates
@@ -260,18 +274,20 @@ def main() -> None:
             text = run_inference(tokenizer, model, image_processor,
                                  list(frames), args.instruction)
             inf_dt = time.perf_counter() - t0
-            vx, vy, vyaw, label = parse_action(text, args.action_duration)
+            vx, vy, vyaw, duration, label = parse_action(text, args.action_duration)
             print(f"step {step:3d}  inf={inf_dt*1000:6.0f} ms  "
                   f"raw={text!r}\n            "
-                  f"-> {label}  vx={vx:+.3f} vy={vy:+.3f} vyaw={vyaw:+.3f}")
+                  f"-> {label}  vx={vx:+.3f} vy={vy:+.3f} vyaw={vyaw:+.3f} "
+                  f"hold={duration:.2f}s")
 
             if label == "stop":
                 send(0.0, 0.0, 0.0)
                 print("NaVILA emitted stop. Exiting loop.")
                 break
 
-            # Stream the chosen velocity for the action duration.
-            t_end = time.perf_counter() + args.action_duration
+            # Stream the chosen velocity for the per-action duration
+            # (NaVILA paper §II-B: fixed speed, distance/speed seconds).
+            t_end = time.perf_counter() + duration
             next_tick = time.perf_counter()
             while time.perf_counter() < t_end:
                 send(vx, vy, vyaw)
