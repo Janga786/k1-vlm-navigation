@@ -329,7 +329,20 @@ class VLMRunner:
         self._instruction = "(none)"
 
         self._frame_lock = threading.Lock()
-        self._frame_buffer: deque = deque(maxlen=NUM_FRAMES)
+        # Episode-length frame log. Paper §II-A: the first frame is ALWAYS
+        # included as part of the historical context, and the other 6
+        # historical frames are uniformly sampled across the episode — so
+        # we cannot use a fixed-size FIFO that evicts the start. Reset on
+        # session start (see Session.__init__ / navila_server.py).
+        self._frame_buffer: list = []
+        # Defensive memory cap. At higher frame rates / long episodes the
+        # buffer would otherwise grow unbounded (5 min @ 3fps × 720p RGB
+        # ≈ 2-3 GB). Once we exceed ``_buf_soft_cap`` frames, compact by
+        # keeping frame[0], the most recent ``_buf_recent_keep`` frames,
+        # and a uniformly-sampled slice of the middle — this preserves
+        # the linspace-sampling invariant the inference path relies on.
+        self._buf_soft_cap = 500
+        self._buf_recent_keep = 50
 
         self.stop_event = threading.Event()
         self._abort = threading.Event()
@@ -362,13 +375,46 @@ class VLMRunner:
             rgb = Image.fromarray(rgb)
         with self._frame_lock:
             self._frame_buffer.append(rgb)
+            if len(self._frame_buffer) > self._buf_soft_cap:
+                self._frame_buffer = self._compact_buffer(
+                    self._frame_buffer,
+                    cap=self._buf_soft_cap,
+                    recent_keep=self._buf_recent_keep,
+                )
+
+    @staticmethod
+    def _compact_buffer(buffer: list, cap: int, recent_keep: int) -> list:
+        """Reduce a too-large frame buffer in-place-safe.
+
+        Keeps ``buffer[0]`` (paper §II-A invariant), the last
+        ``recent_keep`` frames, and a uniformly-sampled slice of the
+        middle to total ``cap`` frames.
+        """
+        if len(buffer) <= cap:
+            return buffer
+        first = buffer[0]
+        recent = buffer[-recent_keep:]
+        middle = buffer[1:-recent_keep]
+        middle_budget = max(0, cap - 1 - recent_keep)
+        if middle and middle_budget < len(middle):
+            idx = np.linspace(0, len(middle) - 1,
+                               num=middle_budget, dtype=int)
+            middle = [middle[i] for i in idx]
+        return [first] + middle + recent
 
     def bootstrap_buffer(self, rgb) -> None:
+        """Seed the episode with the first frame.
+
+        Paper §II-A pins the first frame in the historical context, so we
+        only push it ONCE — uniform sampling at inference time fills the
+        rest. (Previous implementations pre-filled NUM_FRAMES copies; that
+        bloated the buffer and shifted the linspace sampling toward the
+        bootstrap frame for the rest of the episode.)
+        """
         from PIL import Image
         img = rgb if isinstance(rgb, Image.Image) else Image.fromarray(rgb)
         with self._frame_lock:
-            for _ in range(NUM_FRAMES):
-                self._frame_buffer.append(img)
+            self._frame_buffer.append(img)
 
     def get_command(self) -> tuple[float, float, float]:
         with self._lock:
@@ -420,6 +466,39 @@ class VLMRunner:
         with self._frame_lock:
             return list(self._frame_buffer)
 
+    @staticmethod
+    def sample_frames(frames: list, num_frames: int = NUM_FRAMES) -> list:
+        """Paper-correct frame selection for one NaVILA inference call.
+
+        Per NaVILA paper §II-A, the prompt carries 8 frames for real-world
+        deployment (Table IX): the latest frame is the "current
+        observation"; the other 7 are historical frames uniformly sampled
+        from the preceding t-1 frames, with the first frame ALWAYS
+        included. Mirrors ``llava/mm_utils.get_frame_from_vcap_vlnce``:
+
+            sampled = np.linspace(0, len(frames)-1, num=N-1,
+                                   endpoint=False, dtype=int)
+            out = [frames[i] for i in sampled] + [frames[-1]]
+
+        ``np.linspace(... endpoint=False)`` always starts at 0, so
+        ``frames[0]`` is in every sample. If the episode has fewer than
+        ``num_frames`` frames so far, left-pad with the first frame (the
+        existing convention; the reference repo pads with black frames
+        which is harsher for the bootstrap window).
+        """
+        if not frames:
+            raise ValueError("sample_frames called with empty buffer")
+        if len(frames) < num_frames:
+            pad = [frames[0]] * (num_frames - len(frames))
+            return pad + list(frames)
+        indices = np.linspace(0, len(frames) - 1,
+                               num=num_frames - 1,
+                               endpoint=False, dtype=int)
+        return [frames[i] for i in indices] + [frames[-1]]
+
+    def _sample_frames_for_inference(self) -> list:
+        return self.sample_frames(self._snapshot(), NUM_FRAMES)
+
     def _publish(self, vx, vy, vyaw, label, raw, inf_ms):
         with self._lock:
             self._cmd = (vx, vy, vyaw)
@@ -445,9 +524,7 @@ class VLMRunner:
             time.sleep(0.05)
 
         while not self._abort.is_set():
-            frames = self._snapshot()
-            if len(frames) < NUM_FRAMES:
-                frames = [frames[0]] * (NUM_FRAMES - len(frames)) + frames
+            frames = self._sample_frames_for_inference()
             instruction = self.get_instruction()
             t0 = time.perf_counter()
             try:
@@ -458,27 +535,70 @@ class VLMRunner:
                 continue
             inf_ms = (time.perf_counter() - t0) * 1000.0
 
-            vx, vy, vyaw, label = parse_action(raw, self.action_duration)
+            vx, vy, vyaw, duration, label = parse_action(raw, self.action_duration)
+            req_vx, req_vy, req_vyaw = vx, vy, vyaw
             vx = max(-self.vx_max, min(self.vx_max, vx))
             vy = max(-self.vy_max, min(self.vy_max, vy))
             vyaw = max(-self.vyaw_max, min(self.vyaw_max, vyaw))
+
+            # If the operator's safety cap clipped the paper-spec command
+            # speed, stretch the hold so the requested distance / angle is
+            # still achieved (motion = clipped_speed × stretched_duration
+            # ≡ paper_speed × paper_duration). Keeps the model's intent
+            # under conservative caps; only deviation from paper is the
+            # slightly longer execution time.
+            if duration > 0.0:
+                scale = 1.0
+                for req, applied in ((req_vx, vx), (req_vy, vy),
+                                      (req_vyaw, vyaw)):
+                    if applied != 0.0 and abs(applied) < abs(req):
+                        scale = max(scale, abs(req) / abs(applied))
+                duration *= scale
 
             self._publish(vx, vy, vyaw, label, raw, inf_ms)
             print(f"[VLM #{self._inf_count:03d} {inf_ms:5.0f}ms] "
                   f"task={instruction!r}\n"
                   f"            raw={raw!r}\n"
                   f"            -> {label}  "
-                  f"vx={vx:+.2f} vy={vy:+.2f} vyaw={vyaw:+.2f}", flush=True)
+                  f"vx={vx:+.2f} vy={vy:+.2f} vyaw={vyaw:+.2f} "
+                  f"hold={duration:.2f}s", flush=True)
 
             if label == "stop":
                 self.stop_event.set()
+                # Avoid busy-spinning inference while the planner advances
+                # the sub-step / enters drain.
+                time.sleep(0.1)
+                continue
+
+            # Paper §II-B: hold the fixed velocity for the action's
+            # duration, then zero so the robot settles before we re-ask.
+            if duration > 0.0:
+                deadline = t0 + (inf_ms / 1000.0) + duration
+                while not self._abort.is_set():
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
+                if self._abort.is_set():
+                    break
+                self._publish(0.0, 0.0, 0.0, f"{label} (settle)", raw, 0.0)
+                # Brief settle so the K1 walker comes to rest before the
+                # next VLM frame capture / inference cycle.
+                time.sleep(0.1)
 
 
 def _navila_inference(tokenizer, model, image_processor,
                       frames: list, instruction: str,
-                      max_new_tokens: int = 64) -> str:
+                      max_new_tokens: int = 256) -> str:
     """The actual NaVILA call. Module-level so VLMRunner can be tested
-    without importing torch / llava."""
+    without importing torch / llava.
+
+    ``max_new_tokens=256`` matches the reference inference script
+    (``booster/NaVILA/llava/eval/run_navigation.py`` uses 1024 as the
+    arg default and 1024 hard-coded in the call). NaVILA emits a short
+    scene description followed by the action, so a 64-token cap can
+    silently truncate before the action verb appears and force the
+    parser into "unparsed -> stop" — i.e. the robot freezes."""
     import torch
     from llava.constants import IMAGE_TOKEN_INDEX
     from llava.conversation import SeparatorStyle, conv_templates

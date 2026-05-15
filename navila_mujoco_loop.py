@@ -338,13 +338,14 @@ def main() -> None:
                 tokenizer, vlm, image_processor, list(frames), args.instruction)
             inf_ms = (time.perf_counter() - t0) * 1000
 
-            vx, vy, vyaw, label = parse_action(text, args.action_duration)
+            vx, vy, vyaw, duration, label = parse_action(text, args.action_duration)
             last_label, last_text = label, text
             pos = data.qpos[0:3].copy()
             yaw_deg = float(np.degrees(yaw_from_quat(data.qpos[3:7])))
             print(f"step {step:3d}  pos=({pos[0]:+.2f},{pos[1]:+.2f}) "
                   f"yaw={yaw_deg:+.0f}°  inf={inf_ms:5.0f}ms  raw={text!r}")
-            print(f"            -> {label}  vx={vx:+.3f} vy={vy:+.3f} vyaw={vyaw:+.3f}")
+            print(f"            -> {label}  vx={vx:+.3f} vy={vy:+.3f} vyaw={vyaw:+.3f} "
+                  f"hold={duration:.2f}s")
 
             if label == "stop":
                 print("NaVILA emitted stop. Holding pose.")
@@ -358,7 +359,9 @@ def main() -> None:
                     time.sleep(period)
                 break
 
-            t_end = time.perf_counter() + args.action_duration
+            # NaVILA paper §II-B: hold the fixed velocity for the
+            # per-action duration (distance/speed) before re-asking.
+            t_end = time.perf_counter() + duration
             next_tick = time.perf_counter()
             while time.perf_counter() < t_end:
                 slide_base(model, data, vx, vy, vyaw, period)
