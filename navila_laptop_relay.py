@@ -20,8 +20,8 @@ Modes (same progression as navila_k1_realrobot.py):
                     Use to validate the pipeline on the powered robot
                     before going live.
   ``--mode live``   send Move() at SEND_HZ. kWalking on enter,
-                    kDamping on exit. Press ``q`` in the HUD window or
-                    hit Ctrl-C to emergency-stop.
+                    kPrepare on exit (robot stays standing). Press ``q``
+                    in the HUD window or hit Ctrl-C to emergency-stop.
 
 Examples
 ========
