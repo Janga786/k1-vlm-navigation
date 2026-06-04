@@ -131,10 +131,13 @@ class Session:
         self.drain_deadline: Optional[float] = None
         self.last_done_reason: Optional[str] = None
 
-        # Reset VLMRunner buffer + instruction for this session.
-        self.vlm.clear_stop()
-        with self.vlm._frame_lock:  # noqa: SLF001 — internal but stable
-            self.vlm._frame_buffer.clear()  # noqa: SLF001
+        # Reset VLMRunner buffer + instruction for this session. Buffer
+        # MUST be empty before set_instruction so the inference thread
+        # doesn't run the new instruction against stale frames from the
+        # previous one (= "I think I should stop" for the first 2-3
+        # inferences). reset_for_session() also clears stop_event and the
+        # cached command/label.
+        self.vlm.reset_for_session()
         self.vlm.set_instruction(self.substeps[0].instruction)
 
     # ----------------------------------------------------------- frames
@@ -201,7 +204,10 @@ class Session:
                     if pose_yaw is not None:
                         self.state.start_yaw = pose_yaw
                         self.state.last_yaw = pose_yaw
-                    self.vlm.clear_stop()
+                    # Same staleness rule as session start: wipe frames so
+                    # the next sub-step's first NaVILA call sees only fresh
+                    # camera data.
+                    self.vlm.reset_for_session()
                     self.vlm.set_instruction(next_ss.instruction)
                     vlm_cmd = (0.0, 0.0, 0.0)
                     cur_ss = next_ss
@@ -301,6 +307,12 @@ def handle_client(conn: socket.socket, addr: tuple, vlm: VLMRunner) -> None:
             mtype = header.get("type")
 
             if mtype == "set_instruction":
+                # Explicitly reset the VLM state at the request boundary
+                # before we even build SessionConfig. Session.__init__ does
+                # this too, but doing it here makes the contract obvious:
+                # a set_instruction always begins with an empty frame
+                # buffer and a cleared stop_event.
+                vlm.reset_for_session()
                 cfg = SessionConfig(
                     instruction=header["instruction"],
                     per_step_time=float(header.get("per_step_time", 25.0)),

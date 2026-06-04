@@ -324,6 +324,17 @@ class VLMRunner:
         self._raw_text = ""
         self._inf_count = 0
         self._inf_ms = 0.0
+        # Generation counter — bumped by reset_for_session(). The
+        # inference loop captures this at the start of each iteration
+        # and only publishes its result if the gen STILL matches when
+        # the long model.generate() returns. This is what kills the
+        # cross-instruction race: a generate() that started under
+        # instruction A but finishes after the reset for instruction B
+        # would otherwise overwrite cmd/label/stop_event for B with A's
+        # stale answer (the classic "I think I should stop" on the
+        # second instruction). With gen gating, A's late publish is
+        # silently dropped instead.
+        self._gen_id = 0
 
         self._instruction_lock = threading.Lock()
         self._instruction = "(none)"
@@ -434,6 +445,39 @@ class VLMRunner:
     def clear_stop(self) -> None:
         self.stop_event.clear()
 
+    def reset_for_session(self) -> None:
+        """Hard-reset ALL per-instruction state.
+
+        Run at every ``set_instruction`` so the new plan begins with:
+          - empty frame buffer (no stale frames from the previous
+            instruction — otherwise NaVILA's first 2-3 inferences keep
+            seeing the old scene and tend to emit "stop");
+          - cleared stop_event;
+          - zeroed last command;
+          - placeholder label;
+          - zeroed per-instruction inference counters;
+          - bumped generation id, which causes any inference that
+            STARTED before this reset (and is still running inside
+            model.generate()) to be DROPPED instead of publishing its
+            stale result. See ``_gen_id`` docstring above.
+
+        NaVILA itself is stateless across calls — the conversation
+        template is fresh-copied in _navila_inference and the KV cache
+        is internal to a single generate(). So there's nothing else
+        model-side to reset. Safe to call while the inference thread
+        is running.
+        """
+        with self._frame_lock:
+            self._frame_buffer.clear()
+        self.stop_event.clear()
+        with self._lock:
+            self._cmd = (0.0, 0.0, 0.0)
+            self._label = "(buffer cleared — awaiting fresh frames)"
+            self._raw_text = ""
+            self._inf_count = 0
+            self._inf_ms = 0.0
+            self._gen_id += 1
+
     def status(self) -> dict:
         with self._lock:
             return {
@@ -499,13 +543,29 @@ class VLMRunner:
     def _sample_frames_for_inference(self) -> list:
         return self.sample_frames(self._snapshot(), NUM_FRAMES)
 
-    def _publish(self, vx, vy, vyaw, label, raw, inf_ms):
+    def _publish(self, vx, vy, vyaw, label, raw, inf_ms,
+                 gen_at_start: Optional[int] = None) -> bool:
+        """Atomically publish a new inference result.
+
+        If ``gen_at_start`` is provided and no longer matches the
+        current ``_gen_id``, the result is treated as stale (from a
+        previous instruction whose model.generate finished after the
+        reset) and DROPPED. Returns True if the publish landed,
+        False if it was dropped.
+        """
         with self._lock:
+            if gen_at_start is not None and gen_at_start != self._gen_id:
+                return False
             self._cmd = (vx, vy, vyaw)
             self._label = label
             self._raw_text = raw
             self._inf_count += 1
             self._inf_ms = inf_ms
+            return True
+
+    def _current_gen(self) -> int:
+        with self._lock:
+            return self._gen_id
 
     def _do_inference(self, frames, instruction: str) -> str:
         """Override point: production uses NaVILA, tests inject a stub."""
@@ -524,6 +584,12 @@ class VLMRunner:
             time.sleep(0.05)
 
         while not self._abort.is_set():
+            # Capture the generation id at the START of this iteration.
+            # If reset_for_session() bumps _gen_id while model.generate()
+            # below is running, the result is from the previous
+            # instruction and must NOT touch _cmd / stop_event for the
+            # new one.
+            gen_at_start = self._current_gen()
             frames = self._sample_frames_for_inference()
             instruction = self.get_instruction()
             t0 = time.perf_counter()
@@ -534,6 +600,14 @@ class VLMRunner:
                 time.sleep(0.5)
                 continue
             inf_ms = (time.perf_counter() - t0) * 1000.0
+
+            # Stale-result check #1 (most important): drop the result if
+            # a session reset happened while generate() was running.
+            if gen_at_start != self._current_gen():
+                print(f"[VLM] dropping stale result from gen "
+                      f"{gen_at_start} (current={self._current_gen()}): "
+                      f"task={instruction!r} raw={raw!r}", flush=True)
+                continue
 
             vx, vy, vyaw, duration, label = parse_action(raw, self.action_duration)
             req_vx, req_vy, req_vyaw = vx, vy, vyaw
@@ -555,7 +629,11 @@ class VLMRunner:
                         scale = max(scale, abs(req) / abs(applied))
                 duration *= scale
 
-            self._publish(vx, vy, vyaw, label, raw, inf_ms)
+            # Publish gated on gen — if the check above passed but a
+            # race happened, _publish will still drop it.
+            if not self._publish(vx, vy, vyaw, label, raw, inf_ms,
+                                  gen_at_start=gen_at_start):
+                continue
             print(f"[VLM #{self._inf_count:03d} {inf_ms:5.0f}ms] "
                   f"task={instruction!r}\n"
                   f"            raw={raw!r}\n"
@@ -564,7 +642,11 @@ class VLMRunner:
                   f"hold={duration:.2f}s", flush=True)
 
             if label == "stop":
-                self.stop_event.set()
+                # Only set stop_event for the CURRENT generation.
+                # Re-check defensively because some time has passed
+                # since the publish.
+                if gen_at_start == self._current_gen():
+                    self.stop_event.set()
                 # Avoid busy-spinning inference while the planner advances
                 # the sub-step / enters drain.
                 time.sleep(0.1)
@@ -575,13 +657,23 @@ class VLMRunner:
             if duration > 0.0:
                 deadline = t0 + (inf_ms / 1000.0) + duration
                 while not self._abort.is_set():
+                    # Bail out of settle if the session got reset —
+                    # otherwise the (0,0,0) settle publish below would
+                    # land on the NEW instruction with the OLD label,
+                    # and the hold time would block the new plan's
+                    # first inference.
+                    if gen_at_start != self._current_gen():
+                        break
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
                         break
                     time.sleep(min(0.05, remaining))
                 if self._abort.is_set():
                     break
-                self._publish(0.0, 0.0, 0.0, f"{label} (settle)", raw, 0.0)
+                # Final gated publish for the settle. If the gen changed
+                # during the hold, this is a no-op (good).
+                self._publish(0.0, 0.0, 0.0, f"{label} (settle)", raw, 0.0,
+                              gen_at_start=gen_at_start)
                 # Brief settle so the K1 walker comes to rest before the
                 # next VLM frame capture / inference cycle.
                 time.sleep(0.1)
