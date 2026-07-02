@@ -74,7 +74,7 @@ Coverage:
 |---|---|
 | `tests/test_action_parser.py` | NaVILA "move forward 75 cm" / "turn left 30 deg" / "stop" → (vx, vy, vyaw) regex correctness; clipping; unparseable→stop |
 | `tests/test_planner.py` | Multi-step splitter (`\|`, `;`, `then`); auto-detection of yaw/proximity targets; termination logic (yaw delta, proximity, closest-approach, time, stop); priority order; `wrap_pi`; `yaw_from_quat`; controller dispatch (TURN/HEAD/VLM tags); min-vyaw floor; tag fallback when no pose source |
-| `tests/test_sdk_dryrun.py` | Mocks `booster_robotics_sdk_python` and verifies: PrintActuator never touches the SDK; DryRunActuator never calls Move(); LiveActuator initialises with kWalking, sends Move() at SEND_HZ, watchdog zeros stale commands, shutdown always calls kDamping (even if Move() fails — robot must never be left in kWalking) |
+| `tests/test_sdk_dryrun.py` | Mocks `booster_robotics_sdk_python` and verifies: PrintActuator never touches the SDK; DryRunActuator never calls Move(); LiveActuator initialises with kWalking, sends Move() at SEND_HZ, watchdog zeros stale commands, shutdown always returns to kPrepare — standing, never limp kDamping (even if Move() fails; robot must never be left in kWalking) |
 
 If any test fails, **stop**. Do not proceed up the pyramid.
 
@@ -115,7 +115,7 @@ the robot moving**.
 
 ```bash
 # Connect the laptop to the K1's network. Confirm reachable:
-ping -c 2 192.168.0.10                 # or whatever --net is
+ping -c 2 192.168.10.102               # the robot (--net is the LOCAL iface, e.g. eno1)
 
 # Robot should be in kPrepare (sitting). Check the control panel.
 
@@ -123,7 +123,7 @@ cd ~/Projects/k1_research/experiments/navila
 /home/janga/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
     --mode dry \
     --image-source zed \
-    --net 192.168.0.10 \
+    --net eno1 \
     --instruction "walk forward, then turn right 90 deg, then walk forward"
 ```
 
@@ -163,7 +163,7 @@ check the ZED frame is right-side up and not blank.
 - [ ] You know how to abort:
       - **Kill switch** on the K1 itself (stops actuators immediately).
       - **Ctrl-C** in the terminal (LiveActuator.shutdown sends Move(0,0,0)
-        and switches to kDamping; takes ~0.5 s).
+        and switches to kPrepare — the robot stays STANDING; takes ~0.5 s).
       - **Power button** if both above fail.
 
 **Conservative caps** (the realrobot.py defaults):
@@ -178,7 +178,7 @@ check the ZED frame is right-side up and not blank.
 /home/janga/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
     --mode live \
     --image-source zed \
-    --net 192.168.0.10 \
+    --net eno1 \
     --instruction "walk forward 1 meter" \
     --per-step-time 8 --max-sim-seconds 20 \
     --vx-max 0.3 --vyaw-max 0.3
@@ -197,7 +197,7 @@ stack. **Then** scale up to multi-step instructions.
 | K1 keeps drifting laterally | The built-in walker has its own residual drift. Or NaVILA isn't emitting yaw corrections | Enable `--heading-assist` IF you have a pose source plugged into `PoseSource.read()`. Without odometry, the planner can only do time + NaVILA-stop termination. |
 | Turn sub-step takes way too long | NaVILA stubbornly says "move forward" instead of turning. The default turn-controller bypasses NaVILA but needs IMU yaw — without a pose source it falls back to NaVILA-only. | Wire `PoseSource` to read IMU yaw from `LowState` topic. |
 | Watchdog warns "stale command" repeatedly | NaVILA inference is taking > 1.5 s | Bump `--watchdog-seconds 2.5` OR lighten NaVILA (smaller resolution input) |
-| K1 stops mid-walk and won't restart | The actuator is in kDamping after a planner shutdown | Cycle the K1 back to kPrepare manually before re-running |
+| K1 stops mid-walk and won't restart | The actuator returned to kPrepare after a planner shutdown | Re-enter walking via the remote (Prepare → Walk), then re-run |
 | `[actuator/live] Move() failed` after the run starts | Lost network or robot turned off | Check the ethernet cable and `ping`. The watchdog will pin the robot at 0 cmd. |
 
 ---
@@ -233,7 +233,7 @@ stack. **Then** scale up to multi-step instructions.
                 │             Actuator                 │
                 │   print | dry | live                 │
                 │   live = SDK Move() at SEND_HZ +     │
-                │     watchdog + kDamping on shutdown  │
+                │     watchdog + kPrepare on shutdown  │
                 └──────────────────────────────────────┘
                                    │
                                    ▼

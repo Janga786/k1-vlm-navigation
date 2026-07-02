@@ -39,8 +39,10 @@ NUM_FRAMES = 8
 # Safety caps per the SDK example envelope.
 VX_MAX = 0.4
 VY_MAX = 0.15
-VYAW_MAX = 0.2
+VYAW_MAX = 0.4  # was 0.2: parse-level clip must match the deploy vyaw cap, else
+                # runtime --vyaw-max can never be reached by a parsed turn
 ACTION_DURATION = 1.5  # seconds to hold each VLM action before re-asking
+HOLD_MAX = 6.0  # cap on execute-to-completion hold (= benchmark's 180deg/30 worst case)
 SEND_HZ = 20.0
 
 
@@ -73,21 +75,39 @@ def _angle_to_rad(n: float, unit: str) -> float:
     return math.radians(n) if u.startswith("deg") else n
 
 
-def parse_action(text: str, duration: float = ACTION_DURATION) -> tuple[float, float, float, str]:
-    """Return (vx, vy, vyaw, label). Unrecognized -> stop."""
+def parse_action_hold(text: str, duration: float = ACTION_DURATION,
+                      ) -> tuple[float, float, float, str, float]:
+    """Return (vx, vy, vyaw, label, hold_s). Unrecognized -> zero-hold.
+
+    ``hold_s`` is how long the caller should execute this command before
+    re-querying the VLM, sized so the commanded DISPLACEMENT completes even
+    when the velocity is clipped by the caps (benchmark executes-to-completion;
+    without this a clipped "turn right 90 degrees" ran ~1 s at the cap and
+    executed only ~11-15 deg — audit rank 3, still-open half).
+    """
     if _STOP.search(text):
-        return 0.0, 0.0, 0.0, "stop"
+        return 0.0, 0.0, 0.0, "stop", 0.0
     if (m := _FORWARD.search(text)):
         d = _len_to_meters(float(m["n"]), m["u"])
-        return _clip(d / duration, VX_MAX), 0.0, 0.0, f"forward {d:.2f}m"
+        vx = _clip(d / duration, VX_MAX)
+        return vx, 0.0, 0.0, f"forward {d:.2f}m", min(d / vx, HOLD_MAX)
     if (m := _BACKWARD.search(text)):
         d = _len_to_meters(float(m["n"]), m["u"])
-        return -_clip(d / duration, VX_MAX), 0.0, 0.0, f"backward {d:.2f}m"
+        vx = _clip(d / duration, VX_MAX)
+        return -vx, 0.0, 0.0, f"backward {d:.2f}m", min(d / vx, HOLD_MAX)
     if (m := _TURN.search(text)):
         a = _angle_to_rad(float(m["n"]), m["u"])
         sign = 1.0 if m["dir"].lower() == "left" else -1.0
-        return 0.0, 0.0, sign * _clip(a / duration, VYAW_MAX), f"turn {m['dir']} {a:.2f}rad"
-    return 0.0, 0.0, 0.0, "unparsed -> stop"
+        vyaw = _clip(a / duration, VYAW_MAX)
+        hold = min(a / vyaw, HOLD_MAX) if vyaw > 0.0 else 0.0
+        return 0.0, 0.0, sign * vyaw, f"turn {m['dir']} {a:.2f}rad", hold
+    return 0.0, 0.0, 0.0, "unparsed -> stop", 0.0
+
+
+def parse_action(text: str, duration: float = ACTION_DURATION) -> tuple[float, float, float, str]:
+    """Back-compat wrapper: (vx, vy, vyaw, label) without the hold time."""
+    vx, vy, vyaw, label, _ = parse_action_hold(text, duration)
+    return vx, vy, vyaw, label
 
 
 def _clip(v: float, cap: float) -> float:
@@ -115,8 +135,11 @@ def load_navila(model_path: Path):
     disable_torch_init()
     print(f"Loading NaVILA from {model_path} ...")
     model_name = get_model_name_from_path(str(model_path))
+    # VILA llava signature is (model_path, model_base, model_name, ...): passing
+    # model_name positionally lands in model_base AND collides with the keyword
+    # -> TypeError (same fix as navila_k1_core.load_model / vlm_server_bridge.py).
     tokenizer, model, image_processor, _ = load_pretrained_model(
-        str(model_path), model_name, model_base=None,
+        str(model_path), model_base=None, model_name=model_name,
         attn_implementation="sdpa",
     )
     print("NaVILA ready.")
@@ -205,8 +228,10 @@ def make_sender(live: bool, net: str):
         try:
             client.Move(0.0, 0.0, 0.0)
             time.sleep(0.2)
-            client.ChangeMode(RobotMode.kDamping)
-            print("Switched to kDamping.")
+            # kPrepare keeps the biped standing/balancing; kDamping goes limp
+            # and a standing K1 collapses (same policy as LiveActuator.shutdown).
+            client.ChangeMode(RobotMode.kPrepare)
+            print("Switched to kPrepare (standing).")
         except Exception as e:
             print(f"Cleanup failed: {e}", file=sys.stderr)
 

@@ -103,23 +103,23 @@ python navila_laptop_relay.py --mode print \
 # (b) DRY mode — SDK init + connect to K1, Move() is logged not sent.
 python navila_laptop_relay.py --mode dry \
     --image-source mjpeg \
-    --mjpeg-url http://192.168.10.102:8080/stream \
+    --mjpeg-url http://192.168.10.102:8080/frame.jpg \
     --server "$DESKTOP_IP" \
-    --net 192.168.10.102 \
+    --net eno1 \
     --instruction "walk forward 3 meters | turn left 90 deg"
 
 # (c) LIVE mode — floor cleared, K1 IS WALKING. Emergency-stop: 'q' or Ctrl-C.
 python navila_laptop_relay.py --mode live \
     --image-source mjpeg \
-    --mjpeg-url http://192.168.10.102:8080/stream \
+    --mjpeg-url http://192.168.10.102:8080/frame.jpg \
     --server "$DESKTOP_IP" \
-    --net 192.168.10.102 \
+    --net eno1 \
     --instruction "walk to the chair | turn right 90 deg | walk forward"
 ```
 
 While the HUD is up:
-- press **`q`** for an emergency stop (zeros `Move`, switches K1 to `kDamping`,
-  closes the socket, exits)
+- press **`q`** for an emergency stop (zeros `Move`, then returns K1 to `kPrepare` so it
+  stays standing — it does NOT go limp; `kDamping` is never sent. Closes the socket, exits)
 - **Ctrl-C** does the same via SIGINT
 - if the desktop crashes / Tailscale drops, the laptop's tick thread errors
   out within `--io-timeout` seconds AND the `LiveActuator` watchdog
@@ -157,11 +157,15 @@ The laptop doesn't have the ZED plugged in — it's on the K1.  Two options:
    on the K1's onboard computer (the K1 SDK examples don't include one
    out of the box; the Stereolabs SDK's ZED_SVO_Recorder or a 50-line
    gst-launch pipeline both work).  Then on the laptop pass
-   `--image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream`.
+   `--image-source mjpeg --mjpeg-url http://192.168.10.102:8080/frame.jpg`.
 2. **Plug the ZED into the laptop directly** (e.g. for bench tests
    without the robot).  Install pyzed on the laptop and pass
    `--image-source zed`.  Pyzed is not installed by `setup_laptop.sh` —
    grab it from Stereolabs's release page when you need it.
+   NOTE: with `--image-source zed`, ALSO set `NAVILA_UNDISTORT=0`. `prep_frame()`
+   undistorts using the BoosterMipi head-cam intrinsics, which are WRONG for ZED
+   optics and corrupt the geometry NaVILA sees (audit rank 9). The ZED SDK already
+   rectifies its own frames. The BoosterMipi (default deploy cam) keeps `NAVILA_UNDISTORT=1`.
 
 For end-to-end smoke testing without any camera, use
 `--image-source static --image-path some.jpg` or

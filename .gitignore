@@ -14,3 +14,7 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# model weights + session backup artifacts
+*.pt
+*.orig_camfix

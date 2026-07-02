@@ -24,7 +24,8 @@ Three operating modes
 Image source (``--image-source``)
 ==================================
 - ``zed``      live frames from the ZED SDK on the robot.
-- ``mjpeg``    HTTP MJPEG stream (e.g. "http://k1.local:8080/stream").
+- ``mjpeg``    single-frame HTTP endpoint of the on-robot camera bridge
+               (e.g. "http://192.168.10.102:8080/frame.jpg" — never /stream).
 - ``dir``      offline replay: read ``--image-dir/*.jpg`` in name order.
 - ``static``   single image at ``--image-path``, repeated.
 
@@ -35,15 +36,16 @@ For pre-flight validation **without the K1 powered on**:
         --image-source dir --image-dir ./recorded_zed_frames \\
         --instruction "navigate to the red chair"
 
-    # all-up dry-run on the actual robot, no motion:
+    # all-up dry-run on the actual robot, no motion (--net = LOCAL interface
+    # NAME for FastDDS, not an IP — 'eno1' on the lab box, verified 2026-06-15):
     python navila_k1_realrobot.py --mode dry \\
-        --image-source zed --net 192.168.0.10 \\
+        --image-source mjpeg --net eno1 \\
         --instruction "walk forward 3 meters | turn left 90 deg | walk forward"
 
 For live deploy (requires the floor cleared):
 
     python navila_k1_realrobot.py --mode live \\
-        --image-source zed --net 192.168.0.10 \\
+        --image-source mjpeg --net eno1 \\
         --instruction "walk to the chair | turn right 90 deg | walk forward"
 """
 
@@ -134,9 +136,10 @@ class DirReplayImageSource(ImageSource):
 class MJPEGImageSource(ImageSource):
     name = "mjpeg"
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, max_age_s: float = 2.0):
         import urllib.request  # noqa: F401  (used in __call__)
         self.url = url
+        self.max_age_s = max_age_s
         # We'll grab one frame per call; stream-parsing the multipart MJPEG
         # is robust in cv2 but we keep this dep-free.
         print(f"[image] MJPEG stream: {url}")
@@ -145,6 +148,15 @@ class MJPEGImageSource(ImageSource):
         import urllib.request, io
         with urllib.request.urlopen(self.url, timeout=2.0) as r:
             data = r.read()
+            age_ms = r.headers.get("X-Frame-Age-Ms")
+        # Staleness guard: the bridge serves its LAST frame forever if the
+        # camera producer dies — without this the VLM would keep navigating
+        # a frozen world. robot_video_bridge.py stamps X-Frame-Age-Ms on
+        # /frame.jpg; older bridges without the header skip the check.
+        if age_ms is not None and float(age_ms) / 1000.0 > self.max_age_s:
+            raise RuntimeError(
+                f"camera frame is stale ({float(age_ms)/1000.0:.1f}s old > "
+                f"{self.max_age_s:.1f}s) — producer died? check bridge /status")
         # Find a JPEG in the buffer (works if URL serves a single image
         # or an MJPEG multipart frame boundary).
         i = data.find(b"\xff\xd8")
@@ -410,6 +422,56 @@ class PoseSource:
         pass
 
 
+class OdometryPoseSource(PoseSource):
+    """Pose from the K1's built-in odometry (B1OdometerStateSubscriber).
+
+    The SDK publishes ~450 Hz with fields x, y, theta. CRITICAL: the message
+    object is only valid INSIDE the callback — copy the scalars there or you
+    read freed memory (verified 2026-06-15: stale reads give garbage ~2.7e16).
+    Pattern proven in k1_qr_nav's booster_bridge.
+
+    Requires ChannelFactory to be initialised. In dry/live modes the actuator
+    does that; construct with ``init_channel=True`` for print mode.
+
+    ⚠ Sign/frame/scale of theta are UNVALIDATED on a moving robot. First live
+    session: run with ``--pose odom`` but ``--turn-controller`` OFF, watch the
+    printed pose against actual motion, and only then trust closed-loop yaw.
+    """
+
+    def __init__(self, net: str = "eno1", init_channel: bool = False):
+        import threading as _t
+        from booster_robotics_sdk_python import B1OdometerStateSubscriber
+        if init_channel:
+            from booster_robotics_sdk_python import ChannelFactory
+            ChannelFactory.Instance().Init(0, net)
+        self._lock = _t.Lock()
+        self._xyth: Optional[tuple[float, float, float]] = None
+        self._sub = B1OdometerStateSubscriber(self._cb)
+        self._sub.InitChannel()
+        print("[pose] odometry subscriber up (waiting for first message)")
+
+    def _cb(self, msg) -> None:
+        # Copy INSIDE the callback — msg memory is freed after it returns.
+        x, y, th = float(msg.x), float(msg.y), float(msg.theta)
+        with self._lock:
+            self._xyth = (x, y, th)
+
+    def read(self) -> tuple[Optional[tuple[float, float]], Optional[float]]:
+        with self._lock:
+            if self._xyth is None:
+                return None, None
+            x, y, th = self._xyth
+        return (x, y), th
+
+
+def make_pose_source(pose_kind: str, net: str, mode: str) -> PoseSource:
+    """Build the pose source AFTER the actuator init (dry/live own the
+    ChannelFactory; print mode needs its own)."""
+    if pose_kind == "odom":
+        return OdometryPoseSource(net=net, init_channel=(mode == "print"))
+    return PoseSource()
+
+
 # ============================================================================
 # Main loop
 # ============================================================================
@@ -429,7 +491,7 @@ def main() -> None:
                      default="print",
                      help="print = log only, no SDK; dry = SDK init but no "
                           "Move(); live = real motion.")
-    ap.add_argument("--net", type=str, default="127.0.0.1",
+    ap.add_argument("--net", type=str, default="eno1",  # LOCAL iface name (verified 2026-06-15),
                      help="ChannelFactory network interface / robot IP.")
     ap.add_argument("--send-hz", type=float, default=20.0,
                      help="Move() send rate (live mode).")
@@ -444,8 +506,16 @@ def main() -> None:
                      help="--image-source static")
     ap.add_argument("--image-dir", type=Path,
                      help="--image-source dir")
-    ap.add_argument("--mjpeg-url", type=str, default="http://localhost:8080/stream",
-                     help="--image-source mjpeg")
+    ap.add_argument("--mjpeg-url", type=str,
+                     default="http://192.168.10.102:8080/frame.jpg",
+                     help="--image-source mjpeg. Use the /frame.jpg single-shot endpoint, "
+                          "NOT /stream: MJPEGImageSource does one GET+read(), which never "
+                          "returns on the infinite multipart /stream and silently freezes "
+                          "the VLM buffer on the bootstrap frame (audit rank 1, BLOCKER). "
+                          "Default = the on-robot bridge over the wired LAN.")
+    ap.add_argument("--camera-stale-seconds", type=float, default=3.0,
+                     help="Zero the velocity command if no fresh camera frame "
+                          "for this long (VLM must not navigate a frozen world).")
     ap.add_argument("--zed-resolution", type=str, default="VGA",
                      help="--image-source zed (HD2K/HD1080/HD720/VGA)")
     ap.add_argument("--zed-fps", type=int, default=30)
@@ -461,6 +531,20 @@ def main() -> None:
                      help="Conservative on-robot caps; sim defaults are 0.6.")
     ap.add_argument("--vy-max", type=float, default=0.15)
     ap.add_argument("--vyaw-max", type=float, default=0.4)
+
+    # pose
+    ap.add_argument("--pose", choices=["none", "odom"], default="none",
+                     help="Pose source. 'odom' = built-in K1 odometry via "
+                          "B1OdometerStateSubscriber (enables proximity/yaw "
+                          "termination, stall-abort, and the turn controller). "
+                          "Default off: validate odom sign/frame against real "
+                          "motion in a supervised walk before trusting it.")
+    ap.add_argument("--sim-scene-targets", action=argparse.BooleanOptionalAction,
+                     default=False,
+                     help="Use the hardcoded SIM scene-target coordinates "
+                          "(red/blue/green box). NEVER enable on the real robot "
+                          "with --pose odom: the coords are sim fiction and "
+                          "would terminate sub-steps at arbitrary floor spots.")
 
     # controllers
     ap.add_argument("--heading-assist", action=argparse.BooleanOptionalAction,
@@ -490,8 +574,9 @@ def main() -> None:
     print(f"[main] instruction = {args.instruction!r}")
 
     # ----------------------------------------------------------------- plan
+    scene_targets = DEFAULT_SCENE_TARGETS if args.sim_scene_targets else {}
     substeps = parse_substeps(
-        args.instruction, DEFAULT_SCENE_TARGETS,
+        args.instruction, scene_targets,
         default_time=args.per_step_time,
         proximity_threshold=args.proximity_threshold,
     )
@@ -502,7 +587,6 @@ def main() -> None:
     # ---------------------------------------------------------- io / vlm
     image_src = make_image_source(args)
     actuator = make_actuator(args)
-    pose = PoseSource()  # no-op by default; subclass to enable assist
 
     vlm = VLMRunner(
         args.model_path, args.action_duration,
@@ -516,6 +600,9 @@ def main() -> None:
 
     # --------------------------------------------------------- actuator
     actuator.init()
+    # Pose AFTER actuator init: dry/live own the ChannelFactory; print
+    # mode makes OdometryPoseSource init its own channel.
+    pose = make_pose_source(args.pose, args.net, args.mode)
 
     # ---------------------------------------------------------- run loop
     sim_t0 = time.perf_counter()
@@ -523,6 +610,9 @@ def main() -> None:
     next_print = time.perf_counter()
 
     drain_deadline: Optional[float] = None
+    last_sent_cmd = (0.0, 0.0, 0.0)   # what we last told the actuator (arms stall-abort)
+    last_grab_ok = time.perf_counter()  # camera-staleness watchdog
+    live_camera = args.image_source in ("mjpeg", "zed")
     state = TerminationState(
         step_idx=0,
         started_at=time.perf_counter(),
@@ -559,6 +649,8 @@ def main() -> None:
                     vlm_stop=vlm_stop,
                     now=now,
                     yaw_tolerance_deg=args.turn_tolerance_deg,
+                    cmd_moving=(abs(last_sent_cmd[0]) > 0.05
+                                or abs(last_sent_cmd[2]) > 0.05),
                 )
                 if done_reason is not None:
                     print(f"[plan] sub-step {state.step_idx + 1}/{len(substeps)} "
@@ -578,6 +670,7 @@ def main() -> None:
                             state.start_yaw = state.last_yaw = cur_yaw
                         state.yaw_unwrap = 0.0
                         state.min_distance = float("inf")
+                        state.reset_stall_anchor()
                         vlm.clear_stop()
                         vlm.set_instruction(next_ss.instruction)
                         vlm_cmd = (0.0, 0.0, 0.0)
@@ -603,14 +696,25 @@ def main() -> None:
                     turn_min_vyaw=args.turn_min_vyaw,
                 )
 
-            # 5) send to actuator
+            # 5) send to actuator — but never navigate a frozen world: if the
+            # live camera hasn't produced a fresh frame recently, hold still.
+            if (live_camera
+                    and (now - last_grab_ok) > args.camera_stale_seconds
+                    and (out.vx, out.vy, out.vyaw) != (0.0, 0.0, 0.0)):
+                print(f"[safety] camera stale "
+                      f"{now - last_grab_ok:.1f}s > "
+                      f"{args.camera_stale_seconds:.1f}s — zeroing cmd",
+                      file=sys.stderr)
+                out.vx = out.vy = out.vyaw = 0.0
             actuator.send(out.vx, out.vy, out.vyaw)
+            last_sent_cmd = (out.vx, out.vy, out.vyaw)
 
             # 6) push a head frame into the VLM buffer at the configured rate
             if now >= next_frame_push:
                 try:
                     img = image_src()
                     vlm.push_frame(img)
+                    last_grab_ok = now
                 except Exception as e:
                     print(f"[image] grab failed: {e!r}", file=sys.stderr)
                 next_frame_push = now + args.frame_buffer_period

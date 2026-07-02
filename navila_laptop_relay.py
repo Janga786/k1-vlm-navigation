@@ -33,18 +33,19 @@ End-to-end smoke test with a static image, no SDK, no robot::
         --server <desktop-tailscale-ip> \\
         --instruction "walk to the red box"
 
-Powered-robot dry-run (no motion) with ZED on the laptop::
+Powered-robot dry-run (no motion) with the on-robot camera bridge
+(``--net`` = LOCAL interface NAME for FastDDS, e.g. 'eno1' — never an IP)::
 
     python navila_laptop_relay.py --mode dry \\
-        --image-source zed --net 192.168.10.102 \\
-        --server <desktop-tailscale-ip> \\
+        --image-source mjpeg --net eno1 \\
+        --server localhost \\
         --instruction "walk forward 3 meters | turn left 90 deg"
 
 Live deploy::
 
     python navila_laptop_relay.py --mode live \\
-        --image-source zed --net 192.168.10.102 \\
-        --server <desktop-tailscale-ip> \\
+        --image-source mjpeg --net eno1 \\
+        --server localhost \\
         --instruction "walk to the chair | turn right 90 deg | walk forward"
 """
 
@@ -69,6 +70,7 @@ import navila_protocol as proto  # noqa: E402
 from navila_k1_realrobot import (  # noqa: E402
     DryRunActuator, LiveActuator, PrintActuator,
     DirReplayImageSource, MJPEGImageSource, StaticImageSource, ZEDImageSource,
+    make_pose_source,
 )
 from navila_k1_bridge import ACTION_DURATION  # noqa: E402
 
@@ -413,15 +415,21 @@ def main() -> None:
     ap.add_argument("--server", required=True,
                      help="Desktop server host/IP (Tailscale).")
     ap.add_argument("--port", type=int, default=proto.DEFAULT_PORT)
-    ap.add_argument("--io-timeout", type=float, default=5.0,
-                     help="Socket read timeout (s). Hits the watchdog if "
-                          "the server stops responding.")
+    ap.add_argument("--io-timeout", type=float, default=2.5,
+                     help="Socket read timeout (s). Bounds how long a hung "
+                          "server can hold the tick thread; keep it close to "
+                          "--watchdog-seconds so a stale command can't ride "
+                          "much past the watchdog.")
 
     # mode + actuator
     ap.add_argument("--mode", choices=["print", "dry", "live"],
                      default="print")
-    ap.add_argument("--net", type=str, default="192.168.10.102",
-                     help="K1 IP / Ethernet interface for ChannelFactory.")
+    ap.add_argument("--net", type=str, default="eno1",
+                     help="LOCAL network INTERFACE NAME for the SDK's ChannelFactory "
+                          "(NOT the robot IP). Verified 2026-06-15: 'eno1' (this box's "
+                          "192.168.10.10 wired NIC) clears the FastDDS 'whitelist filtered "
+                          "out' error and GetMode reaches the robot. The old default "
+                          "192.168.10.102 (robot IP) was the live-mode blocker.")
     ap.add_argument("--send-hz", type=float, default=20.0,
                      help="Move() send rate inside LiveActuator.")
     ap.add_argument("--watchdog-seconds", type=float, default=1.5,
@@ -435,9 +443,11 @@ def main() -> None:
                      default=Path.home() / "Projects/k1_research/experiments/vla/test_image.jpg")
     ap.add_argument("--image-dir", type=Path)
     ap.add_argument("--mjpeg-url", type=str,
-                     default="http://192.168.10.102:8080/stream",
-                     help="MJPEG stream (use this if the ZED is plugged "
-                          "into the K1 onboard PC, not the laptop).")
+                     default="http://192.168.10.102:8080/frame.jpg",
+                     help="MJPEG single-frame endpoint (use this if the ZED is plugged "
+                          "into the K1 onboard PC, not the laptop). MUST be /frame.jpg, "
+                          "NOT /stream: a single GET+read() never returns on the infinite "
+                          "multipart /stream and freezes the VLM buffer (audit rank 1, BLOCKER).")
     ap.add_argument("--zed-resolution", default="VGA")
     ap.add_argument("--zed-fps", type=int, default=30)
     ap.add_argument("--jpeg-quality", type=int, default=80,
@@ -456,7 +466,22 @@ def main() -> None:
     ap.add_argument("--turn-controller",
                      action=argparse.BooleanOptionalAction, default=False,
                      help="Server-side; needs pose. Off by default — without "
-                          "pose, this would open-loop spin until time-out.")
+                          "pose, this would open-loop spin until time-out. "
+                          "Enable only after --pose odom is validated against "
+                          "real motion (sign/frame unproven until it walks).")
+    ap.add_argument("--pose", choices=["none", "odom"], default="none",
+                     help="Pose source relayed to the server every tick. "
+                          "'odom' = K1 built-in odometry over the SDK "
+                          "(enables server-side proximity/yaw termination + "
+                          "stall-abort). Validate against real motion before "
+                          "trusting the turn controller.")
+    ap.add_argument("--sim-scene-targets",
+                     action=argparse.BooleanOptionalAction, default=False,
+                     help="Tell the server to use the hardcoded SIM scene-target "
+                          "coords. NEVER with --pose odom on the real robot.")
+    ap.add_argument("--camera-stale-seconds", type=float, default=3.0,
+                     help="Zero the outgoing command if no fresh camera frame "
+                          "for this long (never navigate a frozen world).")
 
     # cadence
     ap.add_argument("--tick-period", type=float, default=0.4,
@@ -490,6 +515,7 @@ def main() -> None:
         "heading_assist": args.heading_assist,
         "turn_controller": args.turn_controller,
         "proximity_threshold": args.proximity_threshold,
+        "use_sim_scene_targets": args.sim_scene_targets,
     }
 
     # --- image source --------------------------------------------------------
@@ -517,6 +543,9 @@ def main() -> None:
           f"vyaw<={args.vyaw_max}", flush=True)
     print(f"[laptop] instruction = {args.instruction!r}", flush=True)
     actuator.init()
+    # Pose AFTER actuator init (dry/live own the ChannelFactory; print mode
+    # makes the odometry source init its own channel).
+    pose = make_pose_source(args.pose, args.net, args.mode)
     if args.mode == "live":
         print("[laptop] LIVE mode — K1 IS WALKING. press 'q' or Ctrl-C "
               "to emergency-stop.", flush=True)
@@ -538,13 +567,15 @@ def main() -> None:
     next_grab = time.perf_counter()
     next_print = time.perf_counter() + 1.0
     last_frame = first_frame
+    last_grab_ok = time.perf_counter()
+    live_camera = args.image_source in ("mjpeg", "zed")
     exit_reason = "normal"
 
     try:
         while not stop_requested.is_set():
             now = time.perf_counter()
 
-            # 1) Grab a new frame at the tick-period rate.
+            # 1) Grab a new frame at the tick-period rate; relay pose.
             if now >= next_grab:
                 t_grab = time.perf_counter()
                 try:
@@ -552,10 +583,14 @@ def main() -> None:
                     last_grab_ms = (time.perf_counter() - t_grab) * 1000
                     remote.set_frame_jpeg(encode_jpeg(last_frame,
                                                        args.jpeg_quality))
+                    last_grab_ok = now
                 except Exception as e:
                     print(f"[laptop] image grab failed: {e!r}",
                           file=sys.stderr)
                 next_grab = now + args.tick_period
+            pose_xy, pose_yaw = pose.read()
+            if pose_xy is not None or pose_yaw is not None:
+                remote.set_pose(pose_xy, pose_yaw)
 
             # 2) Latest cmd from server.
             state = remote.get_state()
@@ -567,6 +602,17 @@ def main() -> None:
             vx = _clip(state.vx, args.vx_max)
             vy = _clip(state.vy, args.vy_max)
             vyaw = _clip(state.vyaw, args.vyaw_max)
+            # 3a) Server-link watchdog: sending every ~50 ms refreshes the
+            # LiveActuator's own staleness timer, so IT can never fire while
+            # this loop lives — enforce the guarantee here instead. If the
+            # server hasn't answered a tick within watchdog_seconds, hold zero
+            # rather than riding the last command into a wall.
+            if (state.last_update_at > 0
+                    and (now - state.last_update_at) > args.watchdog_seconds):
+                vx = vy = vyaw = 0.0
+            # 3b) Camera watchdog: never navigate a frozen world.
+            if live_camera and (now - last_grab_ok) > args.camera_stale_seconds:
+                vx = vy = vyaw = 0.0
             actuator.send(vx, vy, vyaw)
 
             # 4) Plan complete?
@@ -632,6 +678,10 @@ def main() -> None:
             pass
         try:
             image_src.close()
+        except Exception:
+            pass
+        try:
+            pose.close()
         except Exception:
             pass
         if cv2 is not None and not args.no_display:

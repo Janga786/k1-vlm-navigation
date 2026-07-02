@@ -1,0 +1,87 @@
+--- a/navila_k1_core.py
++++ b/navila_k1_core.py
+@@ -41,6 +41,66 @@
+ 
+ 
+ # ============================================================================
++# Camera input alignment: make the on-robot frame match the sim benchmark's
++# distortion-free pinhole + chosen squarify, so NaVILA sees the same image
++# distribution on the robot and in eval. Override at runtime (no code edit):
++#   NAVILA_VLM_TRANSFORM = stretch | crop | pad   (MUST match the benchmark run)
++#   NAVILA_UNDISTORT     = 1 (default) | 0
++# BoosterMipi head-cam factory intrinsics @1280x720 (read on-robot 2026-06-08
++# from the soccer vision.yaml SN-calibration). The sim camera is a perfect
++# pinhole, so we undistort the real barrel (k1=-0.055..) to match it.
++# ============================================================================
++VLM_TRANSFORM = os.environ.get("NAVILA_VLM_TRANSFORM", "stretch")
++UNDISTORT = os.environ.get("NAVILA_UNDISTORT", "1") != "0"
++_MIPI_K = np.array([[643.898, 0.0, 649.038],
++                    [0.0, 643.216, 357.21],
++                    [0.0, 0.0, 1.0]], dtype=np.float64)
++_MIPI_DIST = np.array([-0.0553056, 0.065975, -0.000994232, 2.98548e-05, -0.0216579],
++                      dtype=np.float64)
++_MIPI_CAL_W, _MIPI_CAL_H = 1280, 720
++
++
++def _squarify(img, mode):
++    """PIL RGB -> square PIL. stretch=no-op (the VLM resize distorts 16:9->1:1),
++    crop=center-crop (undistorted, ~58deg), pad=letterbox (undistorted, full
++    ~90deg HFOV, black bars)."""
++    from PIL import Image
++    if mode == "stretch":
++        return img
++    W, H = img.size
++    if W == H:
++        return img
++    if mode == "crop":
++        s = min(W, H)
++        l, t = (W - s) // 2, (H - s) // 2
++        return img.crop((l, t, l + s, t + s))
++    s = max(W, H)
++    canvas = Image.new("RGB", (s, s), (0, 0, 0))
++    canvas.paste(img, ((s - W) // 2, (s - H) // 2))
++    return canvas
++
++
++def prep_frame(rgb):
++    """Robot-side camera alignment: undistort the BoosterMipi barrel + squarify so
++    the frame NaVILA sees on the real robot matches the sim benchmark. Use the
++    SAME transform mode as the benchmark run (env NAVILA_VLM_TRANSFORM)."""
++    from PIL import Image
++    arr = np.asarray(rgb.convert("RGB")) if isinstance(rgb, Image.Image) else np.asarray(rgb)
++    if UNDISTORT:
++        try:
++            import cv2
++            h, w = arr.shape[:2]
++            K = _MIPI_K.copy()
++            if (w, h) != (_MIPI_CAL_W, _MIPI_CAL_H):  # scale intrinsics to actual frame size
++                K[0] *= w / _MIPI_CAL_W
++                K[1] *= h / _MIPI_CAL_H
++            arr = cv2.undistort(arr, K, _MIPI_DIST)
++        except Exception as e:  # cv2 missing / odd frame -> keep raw, don't crash deploy
++            print(f"[prep_frame] undistort skipped: {e!r}", flush=True)
++    return _squarify(Image.fromarray(arr), VLM_TRANSFORM)
++
++
++# ============================================================================
+ # Multi-step planner
+ # ============================================================================
+ 
+@@ -357,15 +417,12 @@
+     # --- API used by main thread ----------------------------------------
+ 
+     def push_frame(self, rgb) -> None:
+-        from PIL import Image  # local import to keep tests light
+-        if not isinstance(rgb, Image.Image):
+-            rgb = Image.fromarray(rgb)
++        rgb = prep_frame(rgb)  # undistort + squarify to match the sim benchmark
+         with self._frame_lock:
+             self._frame_buffer.append(rgb)
+ 
+     def bootstrap_buffer(self, rgb) -> None:
+-        from PIL import Image
+-        img = rgb if isinstance(rgb, Image.Image) else Image.fromarray(rgb)
++        img = prep_frame(rgb)  # undistort + squarify to match the sim benchmark
+         with self._frame_lock:
+             for _ in range(NUM_FRAMES):
+                 self._frame_buffer.append(img)

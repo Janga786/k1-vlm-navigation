@@ -36,8 +36,68 @@ for p in (_NAVILA_REPO,):
 # Re-exported from the bridge so callers don't need a second import.
 sys.path.insert(0, str(Path(__file__).parent))
 from navila_k1_bridge import (  # noqa: E402
-    NUM_FRAMES, ACTION_DURATION, build_prompt, parse_action,
+    NUM_FRAMES, ACTION_DURATION, build_prompt, parse_action, parse_action_hold,
 )
+
+
+# ============================================================================
+# Camera input alignment: make the on-robot frame match the sim benchmark's
+# distortion-free pinhole + chosen squarify, so NaVILA sees the same image
+# distribution on the robot and in eval. Override at runtime (no code edit):
+#   NAVILA_VLM_TRANSFORM = stretch | crop | pad   (MUST match the benchmark run)
+#   NAVILA_UNDISTORT     = 1 (default) | 0
+# BoosterMipi head-cam factory intrinsics @1280x720 (read on-robot 2026-06-08
+# from the soccer vision.yaml SN-calibration). The sim camera is a perfect
+# pinhole, so we undistort the real barrel (k1=-0.055..) to match it.
+# ============================================================================
+VLM_TRANSFORM = os.environ.get("NAVILA_VLM_TRANSFORM", "stretch")
+UNDISTORT = os.environ.get("NAVILA_UNDISTORT", "1") != "0"
+_MIPI_K = np.array([[643.898, 0.0, 649.038],
+                    [0.0, 643.216, 357.21],
+                    [0.0, 0.0, 1.0]], dtype=np.float64)
+_MIPI_DIST = np.array([-0.0553056, 0.065975, -0.000994232, 2.98548e-05, -0.0216579],
+                      dtype=np.float64)
+_MIPI_CAL_W, _MIPI_CAL_H = 1280, 720
+
+
+def _squarify(img, mode):
+    """PIL RGB -> square PIL. stretch=no-op (the VLM resize distorts 16:9->1:1),
+    crop=center-crop (undistorted, ~58deg), pad=letterbox (undistorted, full
+    ~90deg HFOV, black bars)."""
+    from PIL import Image
+    if mode == "stretch":
+        return img
+    W, H = img.size
+    if W == H:
+        return img
+    if mode == "crop":
+        s = min(W, H)
+        l, t = (W - s) // 2, (H - s) // 2
+        return img.crop((l, t, l + s, t + s))
+    s = max(W, H)
+    canvas = Image.new("RGB", (s, s), (0, 0, 0))
+    canvas.paste(img, ((s - W) // 2, (s - H) // 2))
+    return canvas
+
+
+def prep_frame(rgb):
+    """Robot-side camera alignment: undistort the BoosterMipi barrel + squarify so
+    the frame NaVILA sees on the real robot matches the sim benchmark. Use the
+    SAME transform mode as the benchmark run (env NAVILA_VLM_TRANSFORM)."""
+    from PIL import Image
+    arr = np.asarray(rgb.convert("RGB")) if isinstance(rgb, Image.Image) else np.asarray(rgb)
+    if UNDISTORT:
+        try:
+            import cv2
+            h, w = arr.shape[:2]
+            K = _MIPI_K.copy()
+            if (w, h) != (_MIPI_CAL_W, _MIPI_CAL_H):  # scale intrinsics to actual frame size
+                K[0] *= w / _MIPI_CAL_W
+                K[1] *= h / _MIPI_CAL_H
+            arr = cv2.undistort(arr, K, _MIPI_DIST)
+        except Exception as e:  # cv2 missing / odd frame -> keep raw, don't crash deploy
+            print(f"[prep_frame] undistort skipped: {e!r}", flush=True)
+    return _squarify(Image.fromarray(arr), VLM_TRANSFORM)
 
 
 # ============================================================================
@@ -150,6 +210,15 @@ class TerminationState:
     last_yaw: float
     yaw_unwrap: float = 0.0          # signed accumulated yaw (rad)
     min_distance: float = float("inf")  # closest approach (m)
+    # Windowed-progress stall backstop (needs pose; see check_termination).
+    stall_anchor_xy: Optional[tuple[float, float]] = None
+    stall_anchor_yaw: float = 0.0    # yaw_unwrap at the anchor
+    stall_anchor_t: float = 0.0
+
+    def reset_stall_anchor(self) -> None:
+        self.stall_anchor_xy = None
+        self.stall_anchor_yaw = 0.0
+        self.stall_anchor_t = 0.0
 
 
 def update_yaw_unwrap(state: TerminationState, current_yaw: float) -> None:
@@ -168,12 +237,24 @@ def check_termination(
     yaw_tolerance_deg: float = 5.0,
     closest_approach_min: float = 1.5,
     closest_approach_margin: float = 0.25,
+    cmd_moving: bool = False,
+    stall_window_s: float = 10.0,
+    stall_disp_m: float = 0.25,
+    stall_yaw_deg: float = 30.0,
 ) -> Optional[str]:
     """Return a human-readable reason if this sub-step is done, else None.
 
     ``current_pos_xy`` may be ``None`` when no pose source exists (real
-    robot without odometry); proximity / closest-approach conditions are
-    then skipped.
+    robot without odometry); proximity / closest-approach / stall
+    conditions are then skipped.
+
+    ``cmd_moving`` (caller passes whether a non-zero velocity is actually
+    being sent) arms the stall backstop: if the robot is commanded to move
+    but covers < ``stall_disp_m`` AND rotates < ``stall_yaw_deg`` over a
+    ``stall_window_s`` window, the sub-step is aborted instead of grinding
+    against the obstacle until the time limit (thresholds = the validated
+    benchmark hopeless-stall gate: wedge 0.13m/8deg fires, escape-grind
+    0.50m/37deg does not).
     """
     # 1) yaw target — most reliable for turn commands
     if ss.yaw_delta_target is not None:
@@ -204,6 +285,31 @@ def check_termination(
     # 3) NaVILA stop
     if vlm_stop:
         return "NaVILA stop"
+
+    # 3.5) windowed-progress stall backstop (needs pose + an active command).
+    # A wedged biped wobbles (~1 rad/s base noise) and creeps, so instantaneous
+    # velocity gates false-fire; only NET progress over a window discriminates.
+    if current_pos_xy is not None and cmd_moving:
+        if state.stall_anchor_xy is None:
+            state.stall_anchor_xy = current_pos_xy
+            state.stall_anchor_yaw = state.yaw_unwrap
+            state.stall_anchor_t = now
+        else:
+            disp = math.hypot(current_pos_xy[0] - state.stall_anchor_xy[0],
+                              current_pos_xy[1] - state.stall_anchor_xy[1])
+            dyaw = abs(state.yaw_unwrap - state.stall_anchor_yaw)
+            if disp >= stall_disp_m or dyaw >= math.radians(stall_yaw_deg):
+                # Progressing — slide the window forward.
+                state.stall_anchor_xy = current_pos_xy
+                state.stall_anchor_yaw = state.yaw_unwrap
+                state.stall_anchor_t = now
+            elif (now - state.stall_anchor_t) >= stall_window_s:
+                return (f"stall-abort ({disp:.2f}m / "
+                        f"{math.degrees(dyaw):.0f}deg net over "
+                        f"{stall_window_s:.0f}s of commanded motion)")
+    else:
+        # Not commanding motion (or no pose) — a standing robot is not stalled.
+        state.stall_anchor_xy = None
 
     # 4) time limit
     if (now - state.started_at) >= ss.time_limit:
@@ -337,16 +443,36 @@ class VLMRunner:
 
     # --- model load (heavy; deferred so tests can skip) -----------------
 
-    def load_model(self) -> None:
+    def load_model(self, load_8bit: bool = False) -> None:
+        # The VILA-aware llava (experiments/navila) MUST win the import over any
+        # standard LLaVA in ~/.local user-site (which shadows conda env packages and
+        # cannot read VILA checkpoints — tokenizer/LLM live under llm/). Same
+        # bootstrap as vlm_server_bridge.py (2026-06-05 lab fix).
+        import sys
+        from pathlib import Path as _P
+        _vila = os.environ.get(
+            "NAVILA_VILA_REPO",
+            str(_P.home() / "Projects/k1_research/experiments/navila"))
+        if _P(_vila).exists() and _vila not in sys.path:
+            sys.path.insert(0, _vila)
         from llava.model.builder import load_pretrained_model  # noqa: E402
         from llava.mm_utils import get_model_name_from_path  # noqa: E402
         from llava.utils import disable_torch_init  # noqa: E402
         disable_torch_init()
-        print(f"[VLM] loading NaVILA from {self.model_path} ...", flush=True)
+        print(f"[VLM] loading NaVILA from {self.model_path} "
+              f"({'int8' if load_8bit else 'fp16'}) ...", flush=True)
         model_name = get_model_name_from_path(str(self.model_path))
+        # installed VILA llava signature is (model_path, model_base, model_name, ...);
+        # passing model_name positionally lands it in model_base -> TypeError
+        # (same fix as vlm_server_bridge.py, 2026-06-05)
+        kwargs = {"attn_implementation": "sdpa"}
+        if load_8bit:
+            # int8 = ~9GB vs ~17GB fp16; benchmark-blessed (replay arbiter:
+            # 7.1% action drift, 100% agreement on success episodes).
+            kwargs["load_8bit"] = True
         self.tokenizer, self.model, self.image_processor, _ = load_pretrained_model(
-            str(self.model_path), model_name, model_base=None,
-            attn_implementation="sdpa",
+            str(self.model_path), model_base=None, model_name=model_name,
+            **kwargs,
         )
         print("[VLM] NaVILA ready.", flush=True)
 
@@ -357,15 +483,12 @@ class VLMRunner:
     # --- API used by main thread ----------------------------------------
 
     def push_frame(self, rgb) -> None:
-        from PIL import Image  # local import to keep tests light
-        if not isinstance(rgb, Image.Image):
-            rgb = Image.fromarray(rgb)
+        rgb = prep_frame(rgb)  # undistort + squarify to match the sim benchmark
         with self._frame_lock:
             self._frame_buffer.append(rgb)
 
     def bootstrap_buffer(self, rgb) -> None:
-        from PIL import Image
-        img = rgb if isinstance(rgb, Image.Image) else Image.fromarray(rgb)
+        img = prep_frame(rgb)  # undistort + squarify to match the sim benchmark
         with self._frame_lock:
             for _ in range(NUM_FRAMES):
                 self._frame_buffer.append(img)
@@ -446,6 +569,13 @@ class VLMRunner:
 
         while not self._abort.is_set():
             frames = self._snapshot()
+            if len(frames) == 0:
+                # Camera source died mid-session (e.g. stream decay): don't crash the
+                # inference thread on frames[0] — idle until frames return. (2026-06-11:
+                # this exact IndexError killed navila_server during a camera outage.)
+                print("[VLM] frame buffer empty — waiting for camera...", flush=True)
+                time.sleep(1.0)
+                continue
             if len(frames) < NUM_FRAMES:
                 frames = [frames[0]] * (NUM_FRAMES - len(frames)) + frames
             instruction = self.get_instruction()
@@ -458,7 +588,8 @@ class VLMRunner:
                 continue
             inf_ms = (time.perf_counter() - t0) * 1000.0
 
-            vx, vy, vyaw, label = parse_action(raw, self.action_duration)
+            vx, vy, vyaw, label, hold_s = parse_action_hold(
+                raw, self.action_duration)
             vx = max(-self.vx_max, min(self.vx_max, vx))
             vy = max(-self.vy_max, min(self.vy_max, vy))
             vyaw = max(-self.vyaw_max, min(self.vyaw_max, vyaw))
@@ -468,10 +599,30 @@ class VLMRunner:
                   f"task={instruction!r}\n"
                   f"            raw={raw!r}\n"
                   f"            -> {label}  "
-                  f"vx={vx:+.2f} vy={vy:+.2f} vyaw={vyaw:+.2f}", flush=True)
+                  f"vx={vx:+.2f} vy={vy:+.2f} vyaw={vyaw:+.2f} "
+                  f"hold={hold_s:.1f}s", flush=True)
 
             if label == "stop":
                 self.stop_event.set()
+                continue
+
+            # Execute-to-completion (benchmark semantics): hold this command
+            # for its computed duration before the next inference so a clipped
+            # turn/forward finishes its commanded displacement. Bail out early
+            # if the sub-step advances (instruction change) or we're shutting
+            # down. If the runner caps re-clipped below the parse-level caps,
+            # stretch the hold so displacement (speed x time) is preserved.
+            p_vx, _, p_vyaw, _, _ = parse_action_hold(raw, self.action_duration)
+            if abs(vyaw) > 1e-6 and abs(p_vyaw) > abs(vyaw):
+                hold_s = min(hold_s * abs(p_vyaw) / abs(vyaw), 6.0)
+            elif abs(vx) > 1e-6 and abs(p_vx) > abs(vx):
+                hold_s = min(hold_s * abs(p_vx) / abs(vx), 6.0)
+            hold_until = time.perf_counter() + hold_s
+            while (not self._abort.is_set()
+                   and time.perf_counter() < hold_until
+                   and self.get_instruction() == instruction
+                   and not self.stop_event.is_set()):
+                time.sleep(0.05)
 
 
 def _navila_inference(tokenizer, model, image_processor,

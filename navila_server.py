@@ -91,6 +91,10 @@ class SessionConfig:
     turn_tolerance_deg: float = 5.0
     proximity_threshold: float = 1.0
     drain_seconds: float = 1.5
+    # SIM-only convenience: hardcoded red/blue/green box world coords. Must
+    # stay OFF on the real robot (with real odometry they'd terminate
+    # sub-steps at fictitious floor spots).
+    use_sim_scene_targets: bool = False
 
 
 class Session:
@@ -115,7 +119,7 @@ class Session:
 
         self.substeps: list[SubStep] = parse_substeps(
             cfg.instruction,
-            DEFAULT_SCENE_TARGETS,
+            DEFAULT_SCENE_TARGETS if cfg.use_sim_scene_targets else {},
             default_time=cfg.per_step_time,
             proximity_threshold=cfg.proximity_threshold,
         )
@@ -130,6 +134,7 @@ class Session:
         self.all_done = False
         self.drain_deadline: Optional[float] = None
         self.last_done_reason: Optional[str] = None
+        self._last_sent = (0.0, 0.0, 0.0)  # arms the stall backstop
 
         # Reset VLMRunner buffer + instruction for this session.
         self.vlm.clear_stop()
@@ -184,6 +189,8 @@ class Session:
                 vlm_stop=vlm_stop,
                 now=now,
                 yaw_tolerance_deg=self.cfg.turn_tolerance_deg,
+                cmd_moving=(abs(self._last_sent[0]) > 0.05
+                            or abs(self._last_sent[2]) > 0.05),
             )
             if done_reason is not None:
                 self.last_done_reason = done_reason
@@ -198,6 +205,7 @@ class Session:
                     self.state.started_at = now
                     self.state.yaw_unwrap = 0.0
                     self.state.min_distance = float("inf")
+                    self.state.reset_stall_anchor()
                     if pose_yaw is not None:
                         self.state.start_yaw = pose_yaw
                         self.state.last_yaw = pose_yaw
@@ -227,6 +235,7 @@ class Session:
             )
             vx, vy, vyaw, tag = out.vx, out.vy, out.vyaw, out.tag
 
+        self._last_sent = (vx, vy, vyaw)
         vlm_status = self.vlm.status()
         with self.vlm._frame_lock:  # noqa: SLF001
             buf_size = len(self.vlm._frame_buffer)  # noqa: SLF001
@@ -319,6 +328,8 @@ def handle_client(conn: socket.socket, addr: tuple, vlm: VLMRunner) -> None:
                     proximity_threshold=float(header.get("proximity_threshold",
                                                            1.0)),
                     drain_seconds=float(header.get("drain_seconds", 1.5)),
+                    use_sim_scene_targets=bool(
+                        header.get("use_sim_scene_targets", False)),
                 )
                 try:
                     session = Session(vlm, cfg)
@@ -410,13 +421,18 @@ def main() -> None:
                      help="NaVILA checkpoint directory.")
     ap.add_argument("--io-timeout", type=float, default=60.0,
                      help="Per-connection socket read timeout (s).")
+    ap.add_argument("--load-8bit", action="store_true",
+                     help="Load the VLM int8 (~9GB vs ~17GB fp16). Benchmark-"
+                          "blessed (replay arbiter: 7.1%% action drift, 100%% "
+                          "agreement on success episodes). fp16 stays the "
+                          "default for deploy.")
     args = ap.parse_args()
 
     print(f"[server] loading NaVILA from {args.model_path} (this is slow)...",
           flush=True)
     # Initialise the VLMRunner ONCE — model stays loaded across reconnects.
     vlm = VLMRunner(args.model_path)
-    vlm.load_model()
+    vlm.load_model(load_8bit=args.load_8bit)
     vlm.start()
     print("[server] model loaded and inference thread running.", flush=True)
 

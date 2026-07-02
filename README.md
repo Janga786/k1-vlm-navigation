@@ -104,12 +104,12 @@ python navila_k1_realrobot.py --mode print \
 
 # all-up dry-run on the actual robot, NO MOTION:
 python navila_k1_realrobot.py --mode dry \
-    --image-source zed --net 192.168.0.10 \
+    --image-source zed --net eno1 \
     --instruction "walk forward 3 meters | turn left 90 deg | walk forward"
 
 # live deploy (REQUIRES the floor cleared):
 python navila_k1_realrobot.py --mode live \
-    --image-source zed --net 192.168.0.10 \
+    --image-source zed --net eno1 \
     --instruction "walk to the chair | turn right 90 deg | walk forward"
 ```
 
@@ -119,12 +119,12 @@ python navila_k1_realrobot.py --mode live \
 |---|---|---|---|---|
 | `print` | none | logged only | none | NaVILA validation, offline replay |
 | `dry`   | yes  | logged only | **none** (stays in kPrepare) | pre-flight on the real robot |
-| `live`  | yes  | yes at SEND_HZ | kWalking → kDamping | actual deploy |
+| `live`  | yes  | yes at SEND_HZ | kWalking → kPrepare (stays standing) | actual deploy |
 
 The LiveActuator runs a background sender at 20 Hz with a **1.5 s watchdog**
 that zeros the cmd if the planner's update is older than that, so a hung
 NaVILA can't carry the robot into a wall. On shutdown it always switches
-the K1 back to **kDamping**, even if the zero-Move() call fails.
+the K1 back to **kPrepare** (standing — kDamping would make a biped collapse), even if the zero-Move() call fails.
 
 Default velocity caps for `realrobot` are conservative (`vx_max=0.4`,
 `vy_max=0.15`, `vyaw_max=0.4`); the MuJoCo loop uses `0.6/0.3/0.6`. Override

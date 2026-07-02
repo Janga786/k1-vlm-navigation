@@ -1,0 +1,14 @@
+accelerate==0.21.0
+bitsandbytes==0.45.5
+gradio==4.16.0
+gradio_client==0.8.1
+llava @ git+https://github.com/haotian-liu/LLaVA.git@c121f0432da27facab705978f83c4ada465e46fd
+mujoco==3.8.1
+numpy==1.26.4
+opencv-python==4.8.1.78
+peft==0.19.1
+pillow==10.4.0
+sentencepiece==0.1.99
+torch==2.1.2+cu118
+torchvision==0.16.2+cu118
+transformers==4.37.2

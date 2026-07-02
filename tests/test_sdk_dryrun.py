@@ -103,8 +103,7 @@ class DryRunActuatorTests(unittest.TestCase):
     def setUp(self):
         self.fake_sdk = _install_fake_sdk()
         from navila_k1_realrobot import DryRunActuator
-        self.act = DryRunActuator(net="192.168.10.102",
-                                   local_ip="127.0.0.1")
+        self.act = DryRunActuator(net="eno1")
 
     def tearDown(self):
         _uninstall_fake_sdk()
@@ -124,10 +123,11 @@ class DryRunActuatorTests(unittest.TestCase):
         self.assertEqual(client.move_calls, [],
                           "DryRunActuator must NEVER call Move()")
 
-    def test_channel_factory_initialised_with_local_ip(self):
+    def test_channel_factory_initialised_with_local_iface(self):
+        # --net is the LOCAL interface NAME (FastDDS), never the robot IP.
         self.act.init()
         cf = _FakeChannelFactory.Instance()
-        self.assertEqual(cf.init_calls, [(0, "127.0.0.1")])
+        self.assertEqual(cf.init_calls, [(0, "eno1")])
 
 
 class LiveActuatorTests(unittest.TestCase):
@@ -136,7 +136,7 @@ class LiveActuatorTests(unittest.TestCase):
         self.fake_sdk = _install_fake_sdk()
         from navila_k1_realrobot import LiveActuator
         # Use a fast send_hz so the test doesn't take long.
-        self.act = LiveActuator(net="192.168.10.102", local_ip="127.0.0.1",
+        self.act = LiveActuator(net="eno1",
                                  send_hz=100.0, watchdog_seconds=0.2)
 
     def tearDown(self):
@@ -171,24 +171,26 @@ class LiveActuatorTests(unittest.TestCase):
         # The most recent Move() call should be (0,0,0) because the cmd is stale.
         self.assertEqual(client.move_calls[-1], (0.0, 0.0, 0.0))
 
-    def test_shutdown_zeroes_and_dampens(self):
+    def test_shutdown_zeroes_and_stands(self):
         self.act.init()
         self.act.send(0.4, 0.0, 0.0)
         time.sleep(0.05)
         self.act.shutdown()
         client: _FakeB1LocoClient = self.act._client
-        # Cleanup must have called Move(0,0,0) and ChangeMode(kDamping).
+        # Cleanup must have called Move(0,0,0) then ChangeMode(kPrepare) —
+        # kPrepare keeps the biped STANDING; kDamping would make it collapse.
         self.assertEqual(client.move_calls[-1], (0.0, 0.0, 0.0))
         self.assertEqual(client.mode_calls,
-                          [_FakeRobotMode.kWalking, _FakeRobotMode.kDamping])
+                          [_FakeRobotMode.kWalking, _FakeRobotMode.kPrepare])
 
     def test_shutdown_idempotent_on_send_failure(self):
         self.act.init()
-        # Make Move() raise — shutdown must still leave the robot in kDamping.
+        # Make Move() raise — shutdown must still return the robot to
+        # kPrepare (standing), never leave it in kWalking.
         self.act._client.Move = mock.Mock(side_effect=RuntimeError("link down"))
         self.act.shutdown()
-        # ChangeMode call to kDamping went through.
-        self.assertIn(_FakeRobotMode.kDamping, self.act._client.mode_calls)
+        self.assertIn(_FakeRobotMode.kPrepare, self.act._client.mode_calls)
+        self.assertNotIn(_FakeRobotMode.kDamping, self.act._client.mode_calls)
 
 
 if __name__ == "__main__":
