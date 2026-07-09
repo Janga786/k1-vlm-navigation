@@ -593,7 +593,16 @@ def main() -> None:
         args.vx_max, args.vy_max, args.vyaw_max,
     )
     vlm.load_model()
-    bootstrap = image_src()
+    try:
+        bootstrap = image_src()
+    except Exception as e:
+        raise SystemExit(
+            f"\n[main] FATAL: could not grab the first camera frame "
+            f"({e.__class__.__name__}: {e}).\n"
+            "  If this is 'Connection refused' on the robot's :8080, the "
+            "camera HTTP bridge is not\n"
+            "  running (start it once per robot boot):  bash bringup_camera.sh\n"
+            "  then verify:  curl http://192.168.10.102:8080/status")
     vlm.bootstrap_buffer(bootstrap)
     vlm.set_instruction(substeps[0].instruction)
     vlm.start()

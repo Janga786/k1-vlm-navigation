@@ -531,7 +531,18 @@ def main() -> None:
     # Bootstrap: grab a first frame *before* starting the tick loop so the
     # server has something in its buffer immediately.
     t_grab0 = time.perf_counter()
-    first_frame = image_src()
+    try:
+        first_frame = image_src()
+    except Exception as e:
+        raise SystemExit(
+            f"\n[laptop] FATAL: could not grab the first camera frame "
+            f"({e.__class__.__name__}: {e}).\n"
+            "  'Connection refused' on the robot's :8080 means the camera "
+            "HTTP bridge is not running\n"
+            "  (it must be started once per robot boot). Fix:\n"
+            "      bash bringup_camera.sh\n"
+            "  then verify:  curl http://192.168.10.102:8080/status\n"
+            "  (runbook §0 — do NOT use StartVisionService)")
     last_grab_ms = (time.perf_counter() - t_grab0) * 1000
     remote.set_frame_jpeg(encode_jpeg(first_frame, args.jpeg_quality))
 
@@ -640,12 +651,24 @@ def main() -> None:
 
             # 7) Periodic console line (HUD-less fallback / log).
             if now >= next_print:
+                # Pose display is the odometry-validation instrument (runbook
+                # ladder): with --pose odom, x/y/theta must track real motion.
+                if pose_xy is None and pose_yaw is None:
+                    pose_str = ("pose=off" if args.pose == "none"
+                                else "pose=WAITING (no odom msg yet)")
+                else:
+                    import math as _m
+                    px = f"{pose_xy[0]:+.2f},{pose_xy[1]:+.2f}" \
+                        if pose_xy is not None else "?,?"
+                    pyaw = (f"{_m.degrees(pose_yaw):+.0f}°"
+                            if pose_yaw is not None else "?")
+                    pose_str = f"pose=({px}) yaw={pyaw}"
                 print(f"[laptop t={now - t0:5.1f}s] "
                       f"step {state.step_idx + 1}/{state.step_total}  "
                       f"out[{state.tag}] vx={vx:+.2f} vy={vy:+.2f} "
                       f"vyaw={vyaw:+.2f}  "
                       f"raw={state.raw!r}  link_age={link_age:.2f}s  "
-                      f"inf#{state.inf_count}",
+                      f"{pose_str}  inf#{state.inf_count}",
                       flush=True)
                 next_print = now + 1.0
 
