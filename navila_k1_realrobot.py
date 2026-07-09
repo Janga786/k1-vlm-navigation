@@ -601,7 +601,7 @@ def main() -> None:
             f"({e.__class__.__name__}: {e}).\n"
             "  If this is 'Connection refused' on the robot's :8080, the "
             "camera HTTP bridge is not\n"
-            "  running (start it once per robot boot):  bash bringup_camera.sh\n"
+            "  running (once per robot boot):  bash ~/k1_qr_nav_ws/camera_up.sh\n"
             "  then verify:  curl http://192.168.10.102:8080/status")
     vlm.bootstrap_buffer(bootstrap)
     vlm.set_instruction(substeps[0].instruction)

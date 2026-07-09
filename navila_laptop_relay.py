@@ -538,11 +538,12 @@ def main() -> None:
             f"\n[laptop] FATAL: could not grab the first camera frame "
             f"({e.__class__.__name__}: {e}).\n"
             "  'Connection refused' on the robot's :8080 means the camera "
-            "HTTP bridge is not running\n"
-            "  (it must be started once per robot boot). Fix:\n"
-            "      bash bringup_camera.sh\n"
+            "HTTP bridge is not running.\n"
+            "  Fix (unlock + bridge the raw feed; required once per robot boot):\n"
+            "      bash ~/k1_qr_nav_ws/camera_up.sh\n"
             "  then verify:  curl http://192.168.10.102:8080/status\n"
-            "  (runbook §0 — do NOT use StartVisionService)")
+            "  (runbook §0; doctrine 2026-07-06: StartVisionService NOFACE "
+            "unlock + /boostercamera/head/raw/rgb)")
     last_grab_ms = (time.perf_counter() - t_grab0) * 1000
     remote.set_frame_jpeg(encode_jpeg(first_frame, args.jpeg_quality))
 
