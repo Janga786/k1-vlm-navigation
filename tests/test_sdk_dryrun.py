@@ -45,20 +45,40 @@ class _FakeChannelFactory:
         self.init_calls.append(args)
 
 
+class _FakeGetModeResponse:
+    def __init__(self):
+        self.mode = None
+
+
 class _FakeB1LocoClient:
+    """Mimics the real binding: ChangeMode/Move/GetMode return an int rc,
+    and the robot honors a mode switch only when it would in reality
+    (configurable via changemode_rc / honor_changemode)."""
+
     def __init__(self):
         self.init_called = False
         self.move_calls: list[tuple] = []
         self.mode_calls: list = []
+        self.current_mode = _FakeRobotMode.kPrepare  # standing, ready
+        self.changemode_rc = 0        # nonzero = explicit refusal
+        self.honor_changemode = True  # False = rc 0 but mode doesn't take
 
     def Init(self):
         self.init_called = True
 
     def ChangeMode(self, mode):
         self.mode_calls.append(mode)
+        if self.changemode_rc == 0 and self.honor_changemode:
+            self.current_mode = mode
+        return self.changemode_rc
 
     def Move(self, vx, vy, vyaw):
         self.move_calls.append((vx, vy, vyaw))
+        return 0
+
+    def GetMode(self, resp):
+        resp.mode = self.current_mode
+        return 0
 
 
 def _install_fake_sdk():
@@ -68,6 +88,7 @@ def _install_fake_sdk():
     fake.B1LocoClient = _FakeB1LocoClient
     fake.ChannelFactory = _FakeChannelFactory
     fake.RobotMode = _FakeRobotMode
+    fake.GetModeResponse = _FakeGetModeResponse
     sys.modules["booster_robotics_sdk_python"] = fake
     return fake
 
@@ -151,6 +172,39 @@ class LiveActuatorTests(unittest.TestCase):
         client: _FakeB1LocoClient = self.act._client
         self.assertTrue(client.init_called)
         self.assertEqual(client.mode_calls, [_FakeRobotMode.kWalking])
+
+    def test_init_raises_when_changemode_refused(self):
+        # A robot not in Prepare returns a nonzero rc — must fail LOUDLY at
+        # launch, not stream Move() into the void ('robot did not move').
+        from navila_k1_realrobot import LiveActuator
+        act = LiveActuator(net="eno1", send_hz=100.0, watchdog_seconds=0.2)
+
+        # Pre-build a client whose ChangeMode refuses.
+        import navila_k1_realrobot as rr  # noqa: F401 (fake sdk already installed)
+        with mock.patch.object(_FakeB1LocoClient, "ChangeMode",
+                               autospec=True) as cm:
+            def refuse(self_c, mode):
+                self_c.mode_calls.append(mode)
+                return 3
+            cm.side_effect = refuse
+            with self.assertRaises(SystemExit) as ctx:
+                act.init()
+            self.assertIn("Prepare", str(ctx.exception))
+
+    def test_init_raises_when_mode_does_not_take(self):
+        # rc == 0 but GetMode still reports kPrepare (silent refusal) — the
+        # GetMode verification must catch it.
+        from navila_k1_realrobot import LiveActuator
+        act = LiveActuator(net="eno1", send_hz=100.0, watchdog_seconds=0.2)
+        with mock.patch.object(_FakeB1LocoClient, "ChangeMode",
+                               autospec=True) as cm:
+            def silently_ignore(self_c, mode):
+                self_c.mode_calls.append(mode)
+                return 0  # claims success, but current_mode never changes
+            cm.side_effect = silently_ignore
+            with self.assertRaises(SystemExit) as ctx:
+                act.init()
+            self.assertIn("NOT", str(ctx.exception))
 
     def test_send_calls_move_at_send_hz(self):
         self.act.init()

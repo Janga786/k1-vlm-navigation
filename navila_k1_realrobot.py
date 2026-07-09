@@ -325,9 +325,17 @@ class LiveActuator(Actuator):
         self._client = B1LocoClient()
         self._client.Init()
         print("[actuator/live] switching to kWalking ...")
-        self._client.ChangeMode(RobotMode.kWalking)
+        rc = self._client.ChangeMode(RobotMode.kWalking)
+        if rc not in (0, None):
+            raise SystemExit(
+                f"\n[actuator/live] ChangeMode(kWalking) REFUSED (rc={rc}).\n"
+                "  The robot only accepts kWalking from the standing Prepare "
+                "state. Put it in\n"
+                "  Prepare via the remote (it must be STANDING), then "
+                "relaunch live mode.")
         self._mode = RobotMode.kWalking
         time.sleep(0.5)
+        self._verify_walking()
         # Background sender ensures Move() is called at SEND_HZ even when
         # the planner only updates the command every ~400 ms (NaVILA
         # inference latency).  If the cmd hasn't been refreshed within
@@ -340,6 +348,36 @@ class LiveActuator(Actuator):
         )
         self._sender_thread.start()
         print("[actuator/live] sender thread started.")
+
+    def _verify_walking(self) -> None:
+        """GetMode round-trip after the switch. A refused kWalking is
+        otherwise SILENT — the robot stands still while Move() calls stream
+        into the void ('robot did not move', 2026-07-09). Requires the robot
+        to have been put in Prepare (standing) via the remote beforehand."""
+        try:
+            from booster_robotics_sdk_python import GetModeResponse
+        except ImportError:
+            print("[actuator/live] (this SDK build lacks GetModeResponse — "
+                  "skipping mode verification)")
+            return
+        try:
+            resp = GetModeResponse()
+            rc = self._client.GetMode(resp)
+        except Exception as e:
+            print(f"[actuator/live] GetMode failed ({e!r}) — cannot verify "
+                  "mode, proceeding blind")
+            return
+        if rc == 0 and resp.mode != self._RobotMode.kWalking:
+            raise SystemExit(
+                f"\n[actuator/live] robot reports mode={resp.mode}, NOT "
+                "kWalking — the mode switch did not take.\n"
+                "  A robot in kDamping / sitting / not-Prepare silently "
+                "refuses kWalking, and every\n"
+                "  Move() after that is ignored (nothing moves). Put the "
+                "robot in Prepare (STANDING)\n"
+                "  via the remote, then relaunch live mode.")
+        if rc == 0:
+            print("[actuator/live] verified: robot is in kWalking.")
 
     def send(self, vx, vy, vyaw):
         with self._cmd_lock:
@@ -362,8 +400,13 @@ class LiveActuator(Actuator):
             print(f"[actuator/live] zero Move() failed: {e!r}",
                   file=sys.stderr)
         try:
-            self._client.ChangeMode(self._RobotMode.kPrepare)
-            print("[actuator/live] kPrepare.")
+            rc = self._client.ChangeMode(self._RobotMode.kPrepare)
+            if rc not in (0, None):
+                print(f"[actuator/live] kPrepare ChangeMode rc={rc} — robot "
+                      "may still be in kWalking! Use the remote to bring it "
+                      "to Prepare.", file=sys.stderr)
+            else:
+                print("[actuator/live] kPrepare.")
         except Exception as e:
             print(f"[actuator/live] kPrepare ChangeMode failed: {e!r}",
                   file=sys.stderr)
