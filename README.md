@@ -10,6 +10,8 @@ commands. Two execution paths share the same brain:
 | `navila_k1_walking_loop.py` | **trained PPO velocity policy** in MuJoCo | sim2sim development; harder NaVILA test (synthetic renders) |
 | `navila_k1_realrobot.py` | **K1's built-in walker** (`B1LocoClient.Move`) | real-robot deploy; battle-tested by Booster across 700+ robots |
 
+Demo clips (MuJoCo simulation, PPO-policy path):
+
 | third-person view | head camera (what NaVILA sees) |
 |---|---|
 | `docs/demo_third_person.mp4` | `docs/demo_head_camera.mp4` |
@@ -174,13 +176,13 @@ the K1's 22-DoF default pose. Lives at `booster_deploy/tasks/locomotion/k1_veloc
 ## Validation
 
 ```bash
-# 58 unit tests: parser regex, sub-step splitter, termination logic,
+# 73 unit tests: parser regex, sub-step splitter, termination logic,
 # closest-approach, controller dispatch, helpers, mocked SDK actuators.
 # No NaVILA, no MuJoCo, no SDK required.
 python -m unittest discover tests -v
 ```
 
-Pass criterion: `Ran 58 tests in ~5s. OK`.
+Pass criterion: `Ran 73 tests in ~5s. OK`.
 
 For everything beyond the unit tests (sim end-to-end, real-robot dry-run,
 real-robot live), see **[VALIDATION.md](VALIDATION.md)** — climbs the
