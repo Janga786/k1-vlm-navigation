@@ -8,7 +8,7 @@ commands. Two execution paths share the same brain:
 | script | who walks the K1 | use case |
 |---|---|---|
 | `navila_k1_walking_loop.py` | **trained PPO velocity policy** in MuJoCo | sim2sim development; harder NaVILA test (synthetic renders) |
-| `navila_k1_realrobot.py` | **K1's built-in walker** (`B1LocoClient.Move`) | real-robot deploy; battle-tested by Booster across 700+ robots |
+| `navila_k1_realrobot.py` | **K1's built-in walker** (`B1LocoClient.Move`) | real-robot deploy path; Booster's production walking controller |
 
 Demo clips (MuJoCo simulation, PPO-policy path):
 
@@ -83,8 +83,9 @@ classical controllers ride underneath, both gated by the parsed sub-step type:
 
 - **Heading assist** — proximity sub-steps overlay
   `vyaw = K_p · (target_bearing − robot_yaw)` on top of NaVILA's command.
-  Cancels the slow gait drift NaVILA cannot compensate for. Without assist
-  the K1 drifts ~1.5 m off-axis per 8 s of walking; with it, ±0.2 m.
+  Cancels the slow gait drift NaVILA cannot compensate for. In informal sim
+  checks, the K1 drifted roughly 1.5 m off-axis per 8 s of walking without
+  assist, and stayed within a few tenths of a meter with it.
 - **Open-loop turn controller** — pure-turn sub-steps **bypass NaVILA**
   entirely (NaVILA stubbornly emits "move forward" most of the time).
   Drives `vx = vy = 0, vyaw = clip(K_p · (yaw_target − yaw_unwrap))`
@@ -198,7 +199,7 @@ pyramid from offline tests all the way to a kill-switch-ready live deploy.
 | [`navila_k1_bridge.py`](navila_k1_bridge.py) | NaVILA loader, prompt builder, action regex parser |
 | [`navila_mujoco_loop.py`](navila_mujoco_loop.py) | older sliding demo (kinematic, no walker) |
 | [`test_navila.py`](test_navila.py) | manual NaVILA smoke test on a single image |
-| [`tests/`](tests/) | 58 unit tests — runnable in any Python 3.10+ env |
+| [`tests/`](tests/) | 73 unit tests — runnable in any Python 3.10+ env |
 | [`VALIDATION.md`](VALIDATION.md) | pre-flight pyramid for real-robot deploy |
 | [`docs/`](docs/) | demo MP4s |
 
@@ -211,7 +212,7 @@ you need:
    `llava` package installed editable).
 2. **NaVILA repo + checkpoint** at
    `~/Projects/k1_research/booster/NaVILA/checkpoints/navila-llama3-8b-8f`.
-   See [NaVILA on GitHub](https://github.com/NVIDIA/NaVILA).
+   See [NaVILA on GitHub](https://github.com/AnjieCheng/NaVILA).
 3. **Booster K1 assets** at `~/Projects/k1_research/booster/booster_assets/`
    (sim path only).
 4. **Booster K1 velocity-tracking policy** registered in `booster_deploy`
