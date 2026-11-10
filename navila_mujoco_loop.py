@@ -21,7 +21,7 @@ torch's CUDA init conflicts with GLFW (mujoco's default windowed backend).
 That's why we use cv2 windows instead of the passive viewer.
 
 Usage:
-    /home/janga/miniconda3/envs/navila/bin/python navila_mujoco_loop.py \\
+    ~/miniconda3/envs/navila/bin/python navila_mujoco_loop.py \\
       --instruction "navigate to the red box"
 """
 from __future__ import annotations

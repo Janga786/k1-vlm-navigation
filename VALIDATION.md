@@ -29,7 +29,7 @@ pass before you go to the next.
 
 ```bash
 # in the navila env (which is the deployment env)
-/home/janga/miniconda3/envs/navila/bin/python -c "
+~/miniconda3/envs/navila/bin/python -c "
 import torch, mujoco, PIL, cv2, numpy as np
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available())
 print('mujoco', mujoco.__version__)
@@ -40,8 +40,8 @@ Expect: torch with CUDA, mujoco ≥ 3.x, cv2.
 
 ```bash
 # llava (NaVILA's own package) — needed only at deploy time, not for tests
-/home/janga/miniconda3/envs/navila/bin/python -c "
-import sys; sys.path.insert(0, '/home/janga/Projects/k1_research/booster/NaVILA')
+~/miniconda3/envs/navila/bin/python -c "
+import sys; sys.path.insert(0, '$HOME/Projects/k1_research/booster/NaVILA')
 from llava.model.builder import load_pretrained_model
 print('llava ok')
 "
@@ -49,7 +49,7 @@ print('llava ok')
 
 ```bash
 # K1 SDK — needed for --mode dry / live, NOT for --mode print
-/home/janga/miniconda3/envs/navila/bin/python -c "
+~/miniconda3/envs/navila/bin/python -c "
 import booster_robotics_sdk_python as sdk
 print('SDK ok:', sdk.__version__ if hasattr(sdk, '__version__') else 'present')
 "
@@ -88,7 +88,7 @@ will run too.
 
 ```bash
 cd ~/Projects/k1_research/experiments/navila
-/home/janga/miniconda3/envs/navila/bin/python navila_k1_walking_loop.py \
+~/miniconda3/envs/navila/bin/python navila_k1_walking_loop.py \
     --instruction "walk to the red box | turn right 90 deg | walk forward" \
     --per-step-time 25 --max-sim-seconds 60 \
     --save-video out_l2
@@ -120,7 +120,7 @@ ping -c 2 192.168.10.102               # the robot (--net is the LOCAL iface, e.
 # Robot should be in kPrepare (sitting). Check the control panel.
 
 cd ~/Projects/k1_research/experiments/navila
-/home/janga/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
+~/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
     --mode dry \
     --image-source zed \
     --net eno1 \
@@ -175,7 +175,7 @@ check the ZED frame is right-side up and not blank.
 
 **Conservative first run**:
 ```bash
-/home/janga/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
+~/miniconda3/envs/navila/bin/python navila_k1_realrobot.py \
     --mode live \
     --image-source zed \
     --net eno1 \

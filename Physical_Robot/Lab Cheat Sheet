@@ -2,7 +2,7 @@ YOUR LAB CHEAT SHEET
   
   A. Start the server (over SSH from the laptop, or in person)
 
-  ssh janga@<DESKTOP_TAILSCALE_IP>      # or:  ssh janga@<DESKTOP_TAILNET_HOSTNAME>
+  ssh <user>@<DESKTOP_TAILSCALE_IP>      # or:  ssh <user>@<DESKTOP_TAILNET_HOSTNAME>
   ~/start_navila_server.sh
 
   Wait for [server] listening on 0.0.0.0:5555 — Ctrl-C to exit. (~5 s).

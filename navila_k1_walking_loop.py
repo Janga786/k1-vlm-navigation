@@ -30,7 +30,7 @@ clashes with torch's CUDA init in this process.
 
 Usage
 -----
-    /home/janga/miniconda3/envs/navila/bin/python navila_k1_walking_loop.py \\
+    ~/miniconda3/envs/navila/bin/python navila_k1_walking_loop.py \\
         --instruction "navigate to the red box" \\
         --steps 30 --save-video ./out
 """
