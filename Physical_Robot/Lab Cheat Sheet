@@ -1,4 +1,4 @@
-YOUR LAB CHEAT SHEET
+LAB CHEAT SHEET
   
   A. Start the server (over SSH from the laptop, or in person)
 
@@ -42,7 +42,7 @@ YOUR LAB CHEAT SHEET
       --mode dry \
       --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
       --server <DESKTOP_TAILSCALE_IP> \
-      --net 192.168.10.102 \ 
+      --net eno1 \ 
       --instruction "walk forward 1 meter"
   (Use --image-source dir --image-dir <recorded> if the K1 doesn't have an
    MJPEG stream up.) [actuator/dry] would send Move(...) lines should
@@ -54,7 +54,7 @@ YOUR LAB CHEAT SHEET
       --mode live \
       --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
       --server <DESKTOP_TAILSCALE_IP> \
-      --net 192.168.10.102 \ 
+      --net eno1 \ 
       --instruction "walk forward 1 meter"
   Test the kill path first: start it, then immediately press q in the HUD
   window. Confirm the robot stops within ~1.5 s. Only after that, run an
@@ -63,8 +63,8 @@ YOUR LAB CHEAT SHEET
   C. Emergency-stop options (in order of preference)
 
   1. Joystick e-stop — physical, always works
-  2. q in the HUD window — zeros Move, switches K1 to kDamping, exits
-  cleanly
+  2. q in the HUD window — zeros Move, returns K1 to kPrepare (standing),
+  exits cleanly
   3. Ctrl-C in the relay terminal — same SIGINT handler
   4. Pull the Ethernet cable — laptop's 1.5 s watchdog zeroes Move, then
   the K1's own loss-of-link logic kicks in
@@ -106,13 +106,13 @@ YOUR LAB CHEAT SHEET
   ────────────────────────────────────────
   symptom: Move() calls don't seem to move the robot
   most likely cause: wrong --net, robot not in kWalking
-  fix: double-check --net 192.168.10.102; verify with
+  fix: double-check --net (the laptop's interface name, e.g. eno1); verify with
     b1_loco_example_client.py first
 
   E. Quick reference
 
   - Desktop Tailscale IP: <DESKTOP_TAILSCALE_IP>  (also: <DESKTOP_TAILNET_HOSTNAME>)
-  - K1 IP: 192.168.10.102 (per your earlier spec)
+  - K1 IP: 192.168.10.102
   - Server port: 5555
   - Conda env (both desktop server + laptop SDK): navila
   - Startup script (desktop): ~/start_navila_server.sh

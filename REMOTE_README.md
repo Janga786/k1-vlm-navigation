@@ -195,7 +195,7 @@ Climb each rung — don't skip:
 
 1. **Unit tests on the desktop:**
    `cd experiments/navila && python -m unittest discover tests -v`
-   (58 tests, ~5 s.)
+   (73 tests, ~5 s.)
 2. **Server boots:**  start `navila_server.py`; confirm the "NaVILA ready"
    line shows up.  This catches checkpoint / CUDA / torch issues.
 3. **Print-mode smoke test (laptop, no robot):**  `--mode print

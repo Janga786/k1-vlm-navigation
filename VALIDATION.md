@@ -1,7 +1,7 @@
 # Validation Pyramid — pre-flight before the K1 actually moves
 
 The real-robot path uses the K1's **built-in walker** (`B1LocoClient.Move`),
-which Booster has battle-tested across 700+ robots. The trained velocity
+Booster's own walking controller. The trained velocity
 policy in `booster_deploy/tasks/locomotion/k1_velocity.py` is for
 sim2sim only and is NOT in this loop. So the only real-world unknown is:
 **does NaVILA produce sensible commands from real ZED camera images?**
