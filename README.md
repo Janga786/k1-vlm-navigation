@@ -1,20 +1,59 @@
-# NaVILA → K1 — VLM-Driven Humanoid Navigation
+# NaVILA → K1: VLM-driven humanoid navigation
 
-Closed-loop demos: a pretrained vision-language model (NaVILA) sees through the
-K1 humanoid's head camera, emits natural-language navigation actions, and a
-multi-step planner + classical controllers turn those actions into velocity
-commands. Two execution paths share the same brain:
+A pretrained vision-language navigation model (NaVILA, 8B parameters) looks through the Booster
+K1 humanoid's head camera, emits natural-language navigation actions at about 1 Hz, and a
+multi-step planner plus two small classical controllers turn those actions into velocity
+commands. The same "brain" drives either a simulated K1 in MuJoCo or the real K1.
+
+**What I built:** the shared planner and controllers (`navila_k1_core.py`), the MuJoCo closed loop
+around my trained walking policy, the real-robot actuator with print/dry/live modes, the
+desktop-server / laptop-relay split used on the physical robot, and the 73 offline unit tests.
+Fort Lewis College, summer 2026 (advisor: Dr. Yiyan Li).
+
+## Demo (simulation)
+
+Both clips are **MuJoCo simulation**, not real hardware: NaVILA commanding the walking policy I
+trained.
+
+| third-person view | head camera (what NaVILA sees) |
+|---|---|
+| [`docs/demo_third_person.mp4`](docs/demo_third_person.mp4) | [`docs/demo_head_camera.mp4`](docs/demo_head_camera.mp4) |
+
+## Results and scope
+
+| where | what ran | walker |
+|---|---|---|
+| MuJoCo (sim2sim) | NaVILA + planner commanding my PPO velocity-tracking policy (235→12 MLP, 50 Hz, trained in Isaac Lab) | my trained policy |
+| Real K1, May 2026 | NaVILA live for **two natural-language episodes** ("walk to the volleyball and stop", "walk to the volleyball and turn left") with zero teleoperation, through the relay in this repo (`navila_server.py` on an RTX 5090, ~350 ms per inference; `navila_laptop_relay.py` sending Booster SDK velocity commands) | Booster's built-in walker (`B1LocoClient.Move`) |
+
+- **My trained walking policy has only worked in simulation.** It has not walked the real robot;
+  both live episodes used Booster's built-in walker.
+- No navigation score is claimed for the live episodes or for the MuJoCo demos in this repo.
+- Recordings of the live session (relay screen capture and a third-person clip) and the
+  1,077-episode simulated benchmark (VLN-CE-Isaac, Isaac Sim) are in
+  [k1-navila-research](https://github.com/Janga786/k1-navila-research); see its
+  `receipts/media/LIVE_EPISODE_RECEIPT.md` for the claim boundary.
+
+## Quick start
+
+```bash
+# offline unit tests (no NaVILA, no MuJoCo, no SDK needed; ~5 s)
+python -m unittest discover tests -v
+
+# MuJoCo closed loop (needs the setup in "Setup notes" below)
+python navila_k1_walking_loop.py --instruction "walk to the red box | turn right 90 deg" --save-video out
+```
+
+Real-robot use goes print → dry → live; see [Real-robot path](#real-robot-path-navila_k1_realrobotpy),
+[`REMOTE_README.md`](REMOTE_README.md) for the server/relay split, and
+[`VALIDATION.md`](VALIDATION.md) for the pre-flight checklist.
+
+## Two execution paths
 
 | script | who walks the K1 | use case |
 |---|---|---|
 | `navila_k1_walking_loop.py` | **trained PPO velocity policy** in MuJoCo | sim2sim development; harder NaVILA test (synthetic renders) |
-| `navila_k1_realrobot.py` | **K1's built-in walker** (`B1LocoClient.Move`) | real-robot deploy path; Booster's production walking controller |
-
-Demo clips (MuJoCo simulation, PPO-policy path):
-
-| third-person view | head camera (what NaVILA sees) |
-|---|---|
-| `docs/demo_third_person.mp4` | `docs/demo_head_camera.mp4` |
+| `navila_k1_realrobot.py` | **K1's built-in walker** (`B1LocoClient.Move`) | real-robot path (also imported by the laptop relay) |
 
 ## Architecture (shared between both paths)
 
@@ -27,7 +66,7 @@ Demo clips (MuJoCo simulation, PPO-policy path):
                 ┌──────────────────▼───────────────────┐
                 │         VLMRunner (thread)           │
                 │   - 8-frame ring buffer              │
-                │   - NaVILA generate() ~400 ms        │
+                │   - NaVILA generate() ~350-500 ms    │
                 │   - parse_action regex               │
                 └──────────────────┬───────────────────┘
                                    │ (vx, vy, vyaw)
@@ -225,4 +264,4 @@ with torch's CUDA init.
 
 ## License
 
-MIT.
+MIT. See [`LICENSE`](LICENSE).
