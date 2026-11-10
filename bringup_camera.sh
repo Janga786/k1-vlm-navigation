@@ -1,8 +1,8 @@
 #!/bin/bash
 # Bring up the K1 head-camera HTTP feed for NaVILA deploy — the SUPPORTED way,
-# per the user's tutorial: K1_Tutorial/Head_Camera.md.
+# per K1_Tutorial/Head_Camera.md.
 #
-# CONTENT-RATE FIX (2026-06-30 16-agent deep-dive, ~/Desktop/CAMERA_FRAMERATE_REPORT.md):
+# CONTENT-RATE FIX (2026-06-30 deep-dive, ~/Desktop/CAMERA_FRAMERATE_REPORT.md):
 # /booster_video_stream sends MESSAGES at 10 fps but its CONTENT changes only ~0.4 fps -- the
 # publisher re-emits the SAME JPEG buffer on a timer (a stale-buffer republish). For real-time
 # nav we bridge a callback-driven topic. RELIABILITY BEATS RATE (2026-06-30 reliability deep-dive):

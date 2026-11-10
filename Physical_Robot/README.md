@@ -1,6 +1,6 @@
 # Robot-Side Scripts
 
-> ✅ **CAMERA DOCTRINE — FINAL (2026-07-06, verified live at ~29.5 fps).**
+> **CAMERA DOCTRINE — FINAL (2026-07-06, verified live at ~29.5 fps).**
 > The X5 head camera **boots into a low-rate idle mode (~0.4 fps)** and must
 > be unlocked with **`StartVisionService` (face detection OFF — `noface`)**
 > after every reboot; then bridge the raw topic
@@ -14,17 +14,13 @@
 > `CAMERA_STEREONET_ISSUE.md` + `/home/booster/K1_camera_fix_notes.md`.
 > Never re-unlock an already-live feed (repeated unlocks degrade the X5).
 
-These scripts live on the K1 robot at /home/booster/ and need to be SCP'd from there when the robot is next powered on:
+## Contents
 
-- vision_service_call.py — ROS2 service caller for StartVisionService (**the per-boot unlock** — see banner; call with `start noface`)
-- x5_camera_rpc.py — X5 camera RPC diagnostic client (⚠ `ChangeMode(3)` on the X5 RPC breaks the stream)
-- walk_test.py — Basic SDK walk test
+- `robot_video_bridge.py`: on-robot ROS 2 → HTTP JPEG bridge (`/frame.jpg`, `/stream`) so a
+  non-ROS host can pull head-camera frames.
+- `Lab Cheat Sheet`: bring-up order and emergency-stop options for the server/relay setup in
+  [`../REMOTE_README.md`](../REMOTE_README.md).
 
-Also grab:
-- K1_camera_fix_notes.md — Full camera recovery procedure
-
-To copy from robot:
-scp booster@192.168.10.102:~/vision_service_call.py Physical_Robot/
-scp booster@192.168.10.102:~/x5_camera_rpc.py Physical_Robot/
-scp booster@192.168.10.102:~/walk_test.py Physical_Robot/
-scp booster@192.168.10.102:~/K1_camera_fix_notes.md .
+Other robot-side helpers (`vision_service_call.py`, `x5_camera_rpc.py`,
+`walk_test.py`, `camera_up.sh`, and the camera notes files) live on the robot and are not
+included in this repository.
