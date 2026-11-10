@@ -42,7 +42,7 @@ LAB CHEAT SHEET
       --mode dry \
       --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
       --server <DESKTOP_TAILSCALE_IP> \
-      --net eno1 \ 
+      --net eno1 \
       --instruction "walk forward 1 meter"
   (Use --image-source dir --image-dir <recorded> if the K1 doesn't have an
    MJPEG stream up.) [actuator/dry] would send Move(...) lines should
@@ -54,7 +54,7 @@ LAB CHEAT SHEET
       --mode live \
       --image-source mjpeg --mjpeg-url http://192.168.10.102:8080/stream \
       --server <DESKTOP_TAILSCALE_IP> \
-      --net eno1 \ 
+      --net eno1 \
       --instruction "walk forward 1 meter"
   Test the kill path first: start it, then immediately press q in the HUD
   window. Confirm the robot stops within ~1.5 s. Only after that, run an

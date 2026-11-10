@@ -24,13 +24,17 @@ trained.
 | where | what ran | walker |
 |---|---|---|
 | MuJoCo (sim2sim) | NaVILA + planner commanding my PPO velocity-tracking policy (235→12 MLP, 50 Hz, trained in Isaac Lab) | my trained policy |
-| Real K1, May 2026 | NaVILA live for **two natural-language episodes** ("walk to the volleyball and stop", "walk to the volleyball and turn left") with zero teleoperation, through the relay in this repo (`navila_server.py` on an RTX 5090, ~350 ms per inference; `navila_laptop_relay.py` sending Booster SDK velocity commands) | Booster's built-in walker (`B1LocoClient.Move`) |
+| Real K1, May 2026 | NaVILA live for **two natural-language episodes** (the recorded one: "walk to the volley ball and turn 90 degrees") with zero teleoperation, through the relay in this repo (`navila_server.py` on an RTX 5090, ~350 ms per inference; `navila_laptop_relay.py` sending Booster SDK velocity commands) | Booster's built-in walker (`B1LocoClient.Move`) |
 
 - **My trained walking policy has only worked in simulation.** It has not walked the real robot;
   both live episodes used Booster's built-in walker.
 - No navigation score is claimed for the live episodes or for the MuJoCo demos in this repo.
+- In the MuJoCo demos, the proximity check and heading assist use privileged information: the
+  target's known world coordinates and the robot's true pose from the simulator. NaVILA itself
+  sees only camera frames. On the real robot both are off by default, so a sub-step ends on
+  NaVILA's own "stop" or the time limit.
 - Recordings of the live session (relay screen capture and a third-person clip) and the
-  1,077-episode simulated benchmark (VLN-CE-Isaac, Isaac Sim) are in
+  1,077-episode simulated benchmark (VLN-CE-Isaac, Isaac Sim) are linked from
   [k1-navila-research](https://github.com/Janga786/k1-navila-research); see its
   `receipts/media/LIVE_EPISODE_RECEIPT.md` for the claim boundary.
 
