@@ -20,7 +20,7 @@
 #
 # Optionally point it at a remote desktop to pull the latest source::
 #
-#     ./setup_laptop.sh --rsync-from janga@desktop.tail-abc123.ts.net
+#     ./setup_laptop.sh --rsync-from <user>@<desktop-host>
 #
 # The script tries to be idempotent — re-running is fine.
 

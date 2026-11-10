@@ -39,11 +39,11 @@ Booster SDK, OpenCV, and Pillow.
 # On the laptop:
 mkdir -p ~/Projects/k1_research/experiments/navila
 # Either rsync directly from the desktop ...
-rsync -av janga@desktop.tail-XXX.ts.net:~/Projects/k1_research/experiments/navila/ \
+rsync -av <user>@<desktop-host>:~/Projects/k1_research/experiments/navila/ \
     ~/Projects/k1_research/experiments/navila/
 # ... or use the bundled script with --rsync-from:
 cd ~/Projects/k1_research/experiments/navila
-./setup_laptop.sh --rsync-from janga@desktop.tail-XXX.ts.net
+./setup_laptop.sh --rsync-from <user>@<desktop-host>
 ```
 
 The setup script:
@@ -71,7 +71,7 @@ It loads the model from
 Expected output:
 
 ```
-[server] loading NaVILA from /home/janga/Projects/k1_research/booster/NaVILA/checkpoints/navila-llama3-8b-8f (this is slow)...
+[server] loading NaVILA from ~/Projects/k1_research/booster/NaVILA/checkpoints/navila-llama3-8b-8f (this is slow)...
 [VLM] loading NaVILA from .../navila-llama3-8b-8f ...
 [VLM] NaVILA ready.
 [server] model loaded and inference thread running.
