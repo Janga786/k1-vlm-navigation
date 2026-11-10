@@ -94,7 +94,7 @@ Real-robot use goes print → dry → live; see [Real-robot path](#real-robot-pa
 ```
 
 The shared brain — VLMRunner, planner, controllers — lives in
-**[`navila_k1_core.py`](navila_k1_core.py)** and is exhaustively unit-tested
+**[`navila_k1_core.py`](navila_k1_core.py)** and is covered by 73 offline unit tests
 in **[`tests/`](tests/)**.
 
 ## Multi-step instructions
@@ -254,9 +254,9 @@ you need:
 1. The `navila` conda env (Python 3.10, torch 2.7+, mujoco 3.x, NaVILA's
    `llava` package installed editable).
 2. **NaVILA repo + checkpoint** at
-   `~/Projects/k1_research/booster/NaVILA/checkpoints/navila-llama3-8b-8f`.
+   `<NAVILA_ROOT>/checkpoints/navila-llama3-8b-8f`.
    See [NaVILA on GitHub](https://github.com/AnjieCheng/NaVILA).
-3. **Booster K1 assets** at `~/Projects/k1_research/booster/booster_assets/`
+3. **Booster K1 assets** at `<BOOSTER_ASSETS>/`
    (sim path only).
 4. **Booster K1 velocity-tracking policy** registered in `booster_deploy`
    as the `k1_velocity` task (sim path only).
